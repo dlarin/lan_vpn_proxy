@@ -55,7 +55,7 @@ CISCO_VPN = "/opt/cisco/secureclient/bin/vpn"  # консольная утили
 CISCO_PREFS = os.path.expanduser("~/.anyconnect")  # сервер и логин последнего подключения
 CISCO_GUI = "vpnui"
 CISCO_TIMEOUT = 120  # секунд на подключение: проверка ноутбука сервером и вход бывают долгими
-CISCO_REFRESH = 10  # секунд между запросами состояния: vpn state идёт около двух секунд
+CISCO_TUNNEL = "cscotun"  # сетевой интерфейс туннеля Cisco: есть, только пока VPN подключён
 # Утилита переводит сообщения на язык системы; разбирать проще английские.
 CISCO_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
 CISCO_GUI_HINT = ("Открыто окно Cisco Secure Client, а пока оно работает, Cisco не даёт подключаться "
@@ -673,47 +673,27 @@ def cisco_error(output, default):
 
 
 class Cisco:
-    """Рабочий VPN: состояние и подключение через консольную утилиту Cisco Secure Client.
+    """Рабочий VPN: подключение через консольную утилиту Cisco Secure Client.
 
     Пароль и код никуда не записываются: они сразу уходят в утилиту.
     """
 
     def __init__(self):
         self.action = threading.Lock()  # одно подключение или отключение за раз
-        self.refreshing = threading.Lock()
-        self.state = None  # Connected, Disconnected, Connecting…; None — ещё не узнали
-        self.checked = 0.0
 
     def installed(self):
         return os.access(CISCO_VPN, os.X_OK)
 
-    def refresh(self):
-        _, out, _ = run(CISCO_VPN, "state", timeout=20, env=CISCO_ENV)
-        # Сначала утилита печатает Unknown; текущее состояние — последнее.
-        states = re.findall(r">> state: (\w+)", out)
-        self.state = states[-1] if states else None
-        self.checked = time.monotonic()
-
-    def refresh_in_background(self):
-        if not self.refreshing.acquire(blocking=False):
-            return
-
-        def job():
-            try:
-                self.refresh()
-            finally:
-                self.refreshing.release()
-        threading.Thread(target=job, daemon=True).start()
+    def connected(self):
+        # По интерфейсу туннеля, а не через vpn state: тот идёт пару секунд и при каждом
+        # запуске пишет в журнал службы десяток строк, а страница спрашивает раз в 3 секунды.
+        return any(name.startswith(CISCO_TUNNEL) for name in os.listdir("/sys/class/net"))
 
     def info(self):
-        """Для страницы. Состояние — из памяти, а устаревшее обновляем в фоне: vpn state идёт пару секунд."""
         if not self.installed():
             return None
-        busy = self.action.locked()
-        if not busy and time.monotonic() - self.checked > CISCO_REFRESH:
-            self.refresh_in_background()
-        return {"state": self.state, "busy": busy, "host": cisco_host(), "user": cisco_prefs()["user"],
-                "gui": cisco_gui_running()}
+        return {"state": "Connected" if self.connected() else "Disconnected", "busy": self.action.locked(),
+                "host": cisco_host(), "user": cisco_prefs()["user"], "gui": cisco_gui_running()}
 
     def connect(self, body):
         fields = [body.get(key) if isinstance(body, dict) else None for key in ("user", "password", "otp")]
@@ -733,11 +713,9 @@ class Cisco:
         if not self.action.acquire(blocking=False):
             return False, "Cisco уже подключается или отключается"
         try:
-            ok, message = self.login(host, user, password, otp)
-            self.refresh()
+            return self.login(host, user, password, otp)
         finally:
             self.action.release()
-        return ok, message
 
     def login(self, host, user, password, otp):
         """Проходит вход vpn connect, отвечая на вопросы утилиты по мере их появления.
@@ -821,10 +799,10 @@ class Cisco:
             return False, "Cisco уже подключается или отключается"
         try:
             _, out, err = run(CISCO_VPN, "disconnect", timeout=60, env=CISCO_ENV)
-            self.refresh()
         finally:
             self.action.release()
-        if self.state == "Disconnected":
+        # Сначала утилита печатает состояние на момент запуска, итог — последнее.
+        if re.findall(r">> state: (\w+)", out)[-1:] == ["Disconnected"] or not self.connected():
             return True, "Cisco отключён."
         return False, cisco_error(out + "\n" + err, "Отключить Cisco не удалось")
 
