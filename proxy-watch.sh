@@ -15,6 +15,9 @@ env_value() {
 CONTAINER="${CONTAINER:-lan-vpn-proxy}"
 HTTP_PORT="${HTTP_PORT:-$(env_value HTTP_PORT)}"
 HTTP_PORT="${HTTP_PORT:-3128}"
+# Перезапуск и пересоздание контейнера (смена сервера) занимают пару секунд. Если на это время
+# выключить прокси, программы успеют открыть прямые соединения и будут держать их часами.
+RESTART_GRACE="${RESTART_GRACE:-5}"
 # Эти адреса всегда идут напрямую, минуя прокси.
 IGNORE_HOSTS="['localhost', '127.0.0.0/8', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '*.local']"
 
@@ -35,25 +38,29 @@ proxy_off() {
     echo "контейнер $CONTAINER остановлен: трафик напрямую"
 }
 
+# Прокси — по фактическому состоянию контейнера. Без "force" ничего не трогает, если уже так.
 sync_state() {
+    local mode
+    mode=$(gsettings get org.gnome.system.proxy mode)
     if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
-        proxy_on
+        [ "${1:-}" = force ] || [ "$mode" != "'manual'" ] && proxy_on
     else
-        proxy_off
+        [ "${1:-}" = force ] || [ "$mode" != "'none'" ] && proxy_off
     fi
 }
 
 while true; do
     # --since повторяет события, случившиеся во время sync_state, чтобы их не пропустить.
     since=$(date +%s)
-    sync_state
+    sync_state force
     docker events --since "$since" --filter type=container --filter "container=$CONTAINER" \
-        --filter event=start --filter event=die --format '{{.Action}}' 2>/dev/null |
-        while read -r action; do
-            case "$action" in
-                start) proxy_on ;;
-                die) proxy_off ;;
-            esac
+        --filter event=start --filter event=die --format '{{.Actor.Attributes.name}} {{.Action}}' 2>/dev/null |
+        while read -r name action; do
+            # Фильтр container= совпадает и по части имени — например, с контейнером
+            # проверки серверов lan-vpn-proxy-check. Нужны события только своего.
+            [ "$name" = "$CONTAINER" ] || continue
+            [ "$action" = die ] && sleep "$RESTART_GRACE"
+            sync_state
         done
     # Сюда попадаем, если Docker недоступен или перезапускается.
     sleep 3
