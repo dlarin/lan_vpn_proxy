@@ -320,6 +320,16 @@ class HostLog:
                 del self.data["days"][old]
             write_json(self.path, self.data)  # это история посещений — права 600
 
+    def reset(self):
+        """Стирает статистику; считать начинаем с этого момента, а не с начала журнала контейнера."""
+        with self.lock:
+            self.data["days"] = {}
+            self.data["since"] = round(time.time() - 5, 3)
+            # Строки журнала не позже этого времени sample() считает уже учтёнными.
+            self.data["last"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y/%m/%d %H:%M:%S.%f")
+            write_json(self.path, self.data)
+        return True, "Статистика по хостам сброшена"
+
     def summary(self, days, group, app=None):
         """Приложения — за весь период; хосты — только выбранного приложения (app=None — всех)."""
         cutoff = (datetime.date.today() - datetime.timedelta(days=days - 1)).isoformat()
@@ -674,6 +684,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/check": check_servers,
             "/api/select": lambda: select_server(body.get("index") if isinstance(body, dict) else None),
             "/api/rules": lambda: save_rules(body),
+            "/api/hosts/reset": HOSTS.reset,
         }.get(self.path)
         if action is None:
             return self.respond(404, {"error": "not found"})
@@ -794,6 +805,7 @@ PAGE = """<!doctype html>
     <option value="1">Сегодня</option><option value="7">7 дней</option><option value="30">30 дней</option>
   </select>
   <label><input type="checkbox" id="hosts-group" checked> по доменам</label>
+  <button id="hosts-reset">Сбросить статистику</button>
 </p>
 <h2>Приложения</h2>
 <table>
@@ -1023,6 +1035,13 @@ async function loadHosts() {
 $('hosts-days').onchange = loadHosts;
 $('hosts-group').onchange = loadHosts;
 $('hosts-app').onchange = loadHosts;
+$('hosts-reset').onclick = async () => {
+  if (!confirm('Сбросить статистику по приложениям и хостам за все дни? Считать начнём заново с этого момента.')) return;
+  try { await post('hosts/reset'); }
+  catch (e) { $('hosts-total').textContent = 'Нет связи с веб-интерфейсом: ' + e; return; }
+  $('hosts-app').value = '';
+  loadHosts();
+};
 setInterval(() => { if (!$('tab-hosts').hidden) loadHosts(); }, 30000);
 
 // Вкладка хранится в адресе (#servers, #hosts), поэтому переживает перезагрузку страницы.
