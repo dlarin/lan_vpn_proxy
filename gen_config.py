@@ -30,10 +30,7 @@ PRIVATE_NETS = [
     "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
     "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
 ]
-# Порты внутри контейнера; наружу пробрасываются в docker-compose.yml.
-SOCKS_PORT = 1080
-HTTP_PORT = 3128
-# API статистики слушает только внутри контейнера, web.py читает его через docker exec.
+# API статистики; web.py читает его через docker exec.
 STATS_API = "127.0.0.1:10085"
 
 
@@ -84,6 +81,15 @@ def set_env_value(path, key, value):
 def setting(dotenv, key, default=None):
     # Как в docker compose: переменная окружения важнее значения из .env.
     return os.environ.get(key) or dotenv.get(key) or default
+
+
+def listen_settings(dotenv):
+    """Где слушает прокси. Контейнер работает в сети хоста, поэтому адрес и порты — прямо в конфиге Xray."""
+    return {
+        "listen": setting(dotenv, "BIND_ADDR", "127.0.0.1"),
+        "socks_port": int(setting(dotenv, "SOCKS_PORT", "1080")),
+        "http_port": int(setting(dotenv, "HTTP_PORT", "3128")),
+    }
 
 
 def b64decode(text):
@@ -279,7 +285,7 @@ def read_source(source, user_agent):
     return text
 
 
-def build_config(server):
+def build_config(server, listen, socks_port, http_port):
     outbounds = list(server["outbounds"])
     if not any(o.get("tag") == "direct" for o in outbounds):
         outbounds.append({"tag": "direct", "protocol": "freedom"})
@@ -292,9 +298,9 @@ def build_config(server):
         "api": {"tag": "api", "listen": STATS_API, "services": ["StatsService"]},
         "policy": {"system": {"statsInboundUplink": True, "statsInboundDownlink": True}},
         "inbounds": [
-            {"tag": "socks", "listen": "0.0.0.0", "port": SOCKS_PORT, "protocol": "socks",
+            {"tag": "socks", "listen": listen, "port": socks_port, "protocol": "socks",
              "settings": {"auth": "noauth", "udp": False}, "sniffing": sniffing},
-            {"tag": "http", "listen": "0.0.0.0", "port": HTTP_PORT, "protocol": "http",
+            {"tag": "http", "listen": listen, "port": http_port, "protocol": "http",
              "settings": {}, "sniffing": sniffing},
         ],
         "outbounds": outbounds,
@@ -388,7 +394,7 @@ def main():
         return
 
     server = pick(servers, args.server)
-    write_json(args.output, build_config(server))
+    write_json(args.output, build_config(server, **listen_settings(dotenv)))
     write_json(SERVERS_FILE, {
         "updated": datetime.datetime.now().isoformat(timespec="minutes"),
         "current": servers.index(server),

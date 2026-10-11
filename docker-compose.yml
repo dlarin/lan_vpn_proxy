@@ -5,9 +5,15 @@ services:
     restart: unless-stopped
     # Свой uid, чтобы xray мог читать config.json с правами 600.
     user: "${PUID:-1000}:${PGID:-1000}"
-    ports:
-      # BIND_ADDR=0.0.0.0 откроет прокси для локальной сети (без пароля!).
-      - "${BIND_ADDR:-127.0.0.1}:${SOCKS_PORT:-1080}:1080"
-      - "${BIND_ADDR:-127.0.0.1}:${HTTP_PORT:-3128}:3128"
+    # Сеть хоста: Xray сам слушает BIND_ADDR, SOCKS_PORT и HTTP_PORT из .env (gen_config.py
+    # пишет их в конфиг) и видит настоящий порт программы — по нему web.py узнаёт приложение.
+    network_mode: host
     volumes:
       - ./xray:/usr/local/etc/xray:ro
+    # Журнал подключений web.py раз в минуту переносит в data/hosts.json, поэтому
+    # держать его целиком незачем.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
