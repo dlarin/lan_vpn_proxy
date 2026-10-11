@@ -18,8 +18,28 @@ HTTP_PORT="${HTTP_PORT:-3128}"
 # Перезапуск и пересоздание контейнера (смена сервера) занимают пару секунд. Если на это время
 # выключить прокси, программы успеют открыть прямые соединения и будут держать их часами.
 RESTART_GRACE="${RESTART_GRACE:-5}"
-# Эти адреса всегда идут напрямую, минуя прокси.
-IGNORE_HOSTS="['localhost', '127.0.0.0/8', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '*.local']"
+# Эти адреса всегда идут напрямую, минуя прокси; к ним добавляется DIRECT_HOSTS из .env.
+LOCAL_HOSTS="'localhost', '127.0.0.0/8', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '*.local'"
+
+# Список исключений для GNOME. .env читается каждый раз: DIRECT_HOSTS меняют на вкладке «Правила».
+# Домен — вместе с поддоменами: example.com и *.example.com. Правила Xray keyword: и regexp:
+# GNOME не понимает — их пропускаем, они действуют только в самом Xray.
+ignore_hosts() {
+    local list="$LOCAL_HOSTS" item items
+    IFS=, read -ra items <<< "${DIRECT_HOSTS:-$(env_value DIRECT_HOSTS)}"
+    for item in "${items[@]}"; do
+        item="${item//[[:space:]]/}"
+        case "$item" in
+            '' | *\'* | *\\* | keyword:* | regexp:*) ;;
+            full:*) list+=", '${item#full:}'" ;;
+            *:*:* | */*) list+=", '$item'" ;;  # IPv6 или сеть
+            *[[:alpha:]]*) item="${item#domain:}"; list+=", '$item', '*.$item'" ;;
+            *[!0-9.]*) ;;  # не IP и не домен: «*» в GNOME пустил бы мимо прокси всё
+            *) list+=", '$item'" ;;  # IPv4
+        esac
+    done
+    echo "[$list]"
+}
 
 proxy_on() {
     gsettings set org.gnome.system.proxy.http host '127.0.0.1'
@@ -28,7 +48,7 @@ proxy_on() {
     gsettings set org.gnome.system.proxy.https port "$HTTP_PORT"
     gsettings set org.gnome.system.proxy.socks host ''
     gsettings set org.gnome.system.proxy.socks port 0
-    gsettings set org.gnome.system.proxy ignore-hosts "$IGNORE_HOSTS"
+    gsettings set org.gnome.system.proxy ignore-hosts "$(ignore_hosts)"
     gsettings set org.gnome.system.proxy mode 'manual'
     echo "контейнер $CONTAINER запущен: прокси включён (127.0.0.1:$HTTP_PORT)"
 }
@@ -39,11 +59,14 @@ proxy_off() {
 }
 
 # Прокси — по фактическому состоянию контейнера. Без "force" ничего не трогает, если уже так.
+# Исключения тоже сверяем: после смены правил контейнер перезапускается, и новый DIRECT_HOSTS
+# попадает в GNOME без выключения прокси.
 sync_state() {
     local mode
     mode=$(gsettings get org.gnome.system.proxy mode)
     if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
-        [ "${1:-}" = force ] || [ "$mode" != "'manual'" ] && proxy_on
+        [ "${1:-}" = force ] || [ "$mode" != "'manual'" ] ||
+            [ "$(gsettings get org.gnome.system.proxy ignore-hosts)" != "$(ignore_hosts)" ] && proxy_on
     else
         [ "${1:-}" = force ] || [ "$mode" != "'none'" ] && proxy_off
     fi

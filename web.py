@@ -2,8 +2,9 @@
 """Веб-интерфейс для включения и выключения lan-vpn-proxy: http://127.0.0.1:WEB_PORT.
 
 Кнопка запускает и останавливает контейнер; системный прокси GNOME вслед за ним
-переключает proxy-watch.sh. Ещё здесь обновление подписки, проверка серверов
-и трафик по дням (замер раз в минуту в data/traffic.json). Только стандартная библиотека Python.
+переключает proxy-watch.sh. Ещё здесь обновление подписки, проверка серверов,
+трафик по дням (замер раз в минуту в data/traffic.json) и рабочий VPN Cisco Secure Client.
+Только стандартная библиотека Python.
 """
 import collections
 import datetime
@@ -11,6 +12,7 @@ import http.client
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -21,6 +23,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from xml.etree import ElementTree
 
 from gen_config import (DEFAULT_OUTPUT, ENV_FILE, OUTBOUNDS_FILE, PROJECT_DIR, SERVERS_FILE, STATS_API,
                         build_check_config, build_config, config_settings, load_env, set_env_value, setting,
@@ -48,6 +51,15 @@ CHECK_CONTAINER = "lan-vpn-proxy-check"
 CHECK_FIRST_PORT = 20801  # проверка занимает 127.0.0.1:20801… — по порту на сервер
 CHECK_URL = "https://www.gstatic.com/generate_204"
 CHECK_TIMEOUT = 8
+CISCO_VPN = "/opt/cisco/secureclient/bin/vpn"  # консольная утилита Cisco Secure Client
+CISCO_PREFS = os.path.expanduser("~/.anyconnect")  # сервер и логин последнего подключения
+CISCO_GUI = "vpnui"
+CISCO_TIMEOUT = 120  # секунд на подключение: проверка ноутбука сервером и вход бывают долгими
+CISCO_REFRESH = 10  # секунд между запросами состояния: vpn state идёт около двух секунд
+# Утилита переводит сообщения на язык системы; разбирать проще английские.
+CISCO_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+CISCO_GUI_HINT = ("Открыто окно Cisco Secure Client, а пока оно работает, Cisco не даёт подключаться "
+                  "из других программ. Закройте его и нажмите ещё раз.")
 
 dotenv = load_env(ENV_FILE)
 WEB_PORT = int(setting(dotenv, "WEB_PORT", "8765"))
@@ -63,10 +75,10 @@ CHECK_LOCK = threading.Lock()
 last_check = {"time": None, "delays": {}}
 
 
-def run(*cmd, timeout=60):
+def run(*cmd, timeout=60, env=None):
     """Возвращает (успех, stdout, stderr)."""
     try:
-        result = subprocess.run(cmd, cwd=PROJECT_DIR, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, cwd=PROJECT_DIR, capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, "", str(e)
     return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
@@ -461,7 +473,7 @@ def save_rules(body):
     if not isinstance(body, dict) or body.get("mode") not in ("all", "filter"):
         return False, "Неверный режим"
     lists = {}
-    for key in ("apps", "hosts"):
+    for key in ("apps", "hosts", "direct"):
         items = body.get(key)
         if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
             return False, "Неверный список"
@@ -481,12 +493,14 @@ def save_rules(body):
         set_env_value(ENV_FILE, "ROUTING_MODE", body["mode"])
         set_env_value(ENV_FILE, "VPN_APPS", ", ".join(lists["apps"]))
         set_env_value(ENV_FILE, "VPN_HOSTS", ", ".join(lists["hosts"]))
+        set_env_value(ENV_FILE, "DIRECT_HOSTS", ", ".join(lists["direct"]))
         ok, restarted = restart_if_running()
     if not ok:
         return False, restarted
     mode = "всё через VPN" if body["mode"] == "all" else \
         f"по списку: приложений {len(lists['apps'])}, хостов {len(lists['hosts'])}"
-    return True, f"Сохранено, режим — {mode}." + (" Контейнер перезапущен." if restarted else "")
+    direct = f", всегда напрямую: {len(lists['direct'])}" if lists["direct"] else ""
+    return True, f"Сохранено, режим — {mode}{direct}." + (" Контейнер перезапущен." if restarted else "")
 
 
 def comparable_config():
@@ -590,6 +604,7 @@ def status():
         "server": servers["servers"][servers["current"]] if servers else None,
         "routing": rules_info(),
         "servers_updated": servers["updated"] if servers else None,
+        "cisco": CISCO.info(),
     }
 
 
@@ -620,6 +635,194 @@ def fetch_ip(proxy=None):
 def check_ip():
     vpn = fetch_ip(f"http://127.0.0.1:{HTTP_PORT}") if container_state()["running"] else None
     return {"vpn": vpn, "direct": fetch_ip()}
+
+
+def cisco_prefs():
+    """Сервер и логин, с которыми Cisco Secure Client подключался последний раз."""
+    try:
+        root = ElementTree.parse(CISCO_PREFS).getroot()
+    except (OSError, ElementTree.ParseError):
+        return {"host": "", "user": ""}
+    return {"host": root.findtext("DefaultHostName") or "", "user": root.findtext("DefaultUser") or ""}
+
+
+def cisco_host():
+    # CISCO_HOST из .env важнее сервера последнего подключения.
+    return setting(load_env(ENV_FILE), "CISCO_HOST") or cisco_prefs()["host"]
+
+
+def cisco_gui_running():
+    return run("pgrep", "-x", CISCO_GUI, timeout=5)[0]
+
+
+def cisco_error(output, default):
+    """Понятное сообщение из вывода утилиты vpn."""
+    if "capability is unavailable" in output:
+        return CISCO_GUI_HINT
+    if "Login failed" in output:
+        return "Сервер не принял логин, пароль или код."
+    errors = re.findall(r">> ((?:error|warning): [^\n]*)", output)
+    return "; ".join(dict.fromkeys(errors)) or default
+
+
+class Cisco:
+    """Рабочий VPN: состояние и подключение через консольную утилиту Cisco Secure Client.
+
+    Пароль и код никуда не записываются: они сразу уходят в утилиту.
+    """
+
+    def __init__(self):
+        self.action = threading.Lock()  # одно подключение или отключение за раз
+        self.refreshing = threading.Lock()
+        self.state = None  # Connected, Disconnected, Connecting…; None — ещё не узнали
+        self.checked = 0.0
+
+    def installed(self):
+        return os.access(CISCO_VPN, os.X_OK)
+
+    def refresh(self):
+        _, out, _ = run(CISCO_VPN, "state", timeout=20, env=CISCO_ENV)
+        # Сначала утилита печатает Unknown; текущее состояние — последнее.
+        states = re.findall(r">> state: (\w+)", out)
+        self.state = states[-1] if states else None
+        self.checked = time.monotonic()
+
+    def refresh_in_background(self):
+        if not self.refreshing.acquire(blocking=False):
+            return
+
+        def job():
+            try:
+                self.refresh()
+            finally:
+                self.refreshing.release()
+        threading.Thread(target=job, daemon=True).start()
+
+    def info(self):
+        """Для страницы. Состояние — из памяти, а устаревшее обновляем в фоне: vpn state идёт пару секунд."""
+        if not self.installed():
+            return None
+        busy = self.action.locked()
+        if not busy and time.monotonic() - self.checked > CISCO_REFRESH:
+            self.refresh_in_background()
+        return {"state": self.state, "busy": busy, "host": cisco_host(), "user": cisco_prefs()["user"],
+                "gui": cisco_gui_running()}
+
+    def connect(self, body):
+        fields = [body.get(key) if isinstance(body, dict) else None for key in ("user", "password", "otp")]
+        if not all(isinstance(value, str) for value in fields):
+            return False, "Неверный запрос"
+        user, password, otp = fields[0].strip(), fields[1], fields[2].strip()
+        if not user or not password:
+            return False, "Введите логин и пароль"
+        # Перевод строки утилита приняла бы за ответ на следующий вопрос.
+        if any(c in value for value in (user, password, otp) for c in "\r\n"):
+            return False, "Недопустимые символы в логине, пароле или коде"
+        host = cisco_host()
+        if not host:
+            return False, "Не задан сервер Cisco: впишите CISCO_HOST в .env"
+        if cisco_gui_running():
+            return False, CISCO_GUI_HINT
+        if not self.action.acquire(blocking=False):
+            return False, "Cisco уже подключается или отключается"
+        try:
+            ok, message = self.login(host, user, password, otp)
+            self.refresh()
+        finally:
+            self.action.release()
+        return ok, message
+
+    def login(self, host, user, password, otp):
+        """Проходит вход vpn connect, отвечая на вопросы утилиты по мере их появления.
+
+        Что спросить, решает сервер (группа, логин, пароль, код, согласие с баннером), поэтому
+        отвечаем по тексту вопроса. Вопросы утилита задаёт только в терминале — setsid -c даёт
+        ей псевдотерминал.
+        """
+        master, slave = os.openpty()
+        try:
+            proc = subprocess.Popen(["setsid", "-wc", CISCO_VPN, "connect", host], stdin=slave, stdout=slave,
+                                    stderr=slave, cwd=PROJECT_DIR, env=CISCO_ENV)
+        except OSError as e:
+            os.close(master)
+            return False, str(e)
+        finally:
+            os.close(slave)
+        output, answered, asked = "", 0, set()
+        deadline = time.monotonic() + CISCO_TIMEOUT
+        try:
+            while ">> state: Connected" not in output:
+                if time.monotonic() > deadline:
+                    return False, f"Cisco не подключился за {CISCO_TIMEOUT // 60} мин."
+                if select.select([master], [], [], 0.5)[0]:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:  # EIO: утилита завершилась и закрыла терминал
+                        break
+                    if not chunk:
+                        break
+                    output += chunk.decode("utf-8", "replace").replace("\r", "")
+                    continue  # отвечаем, только когда утилита замолчала на вопросе
+                if proc.poll() is not None:
+                    break
+                # Вопрос — недописанная строка после нашего прошлого ответа: «Username: [dima]», «Password:».
+                prompt = output[answered:].rpartition("\n")[2].strip()
+                if not prompt or prompt.startswith("VPN>"):
+                    continue
+                label = prompt.split(":", 1)[0].strip().lower()
+                if "[y/n]" in prompt:
+                    answer = "y"  # баннер сервера — то же, что «Принять» в окне Cisco
+                elif label == "group":
+                    answer = ""  # группа по умолчанию: её задаёт адрес сервера
+                elif "Login failed" in output or (label == "username" and "username" in asked):
+                    # После неудачного входа утилита спрашивает логин заново.
+                    return False, cisco_error(output, "Сервер не принял логин, пароль или код.")
+                elif label == "username":
+                    asked.add("username")
+                    answer = user
+                elif label == "password" and "password" not in asked:
+                    asked.add("password")
+                    answer = password
+                elif "password" in asked and "otp" not in asked:
+                    # Следующий вопрос после пароля — код: Second Password, Answer, Response — как назовёт сервер.
+                    if not otp:
+                        return False, "Сервер просит одноразовый код"
+                    asked.add("otp")
+                    answer = otp
+                else:
+                    return False, f"Cisco спрашивает «{prompt}», а веб-интерфейс не знает ответа — подключитесь в окне Cisco"
+                os.write(master, (answer + "\n").encode())
+                answered = len(output)
+        finally:
+            try:
+                # Подключившись, утилита выходит сама; в остальных случаях прерываем её.
+                proc.wait(10 if ">> state: Connected" in output else 0.1)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            os.close(master)
+        if ">> state: Connected" in output:
+            return True, f"Cisco подключён к {host}."
+        return False, cisco_error(output, "Подключиться не удалось")
+
+    def disconnect(self):
+        if not self.action.acquire(blocking=False):
+            return False, "Cisco уже подключается или отключается"
+        try:
+            _, out, err = run(CISCO_VPN, "disconnect", timeout=60, env=CISCO_ENV)
+            self.refresh()
+        finally:
+            self.action.release()
+        if self.state == "Disconnected":
+            return True, "Cisco отключён."
+        return False, cisco_error(out + "\n" + err, "Отключить Cisco не удалось")
+
+
+CISCO = Cisco()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -685,6 +888,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/select": lambda: select_server(body.get("index") if isinstance(body, dict) else None),
             "/api/rules": lambda: save_rules(body),
             "/api/hosts/reset": HOSTS.reset,
+            "/api/cisco/connect": lambda: CISCO.connect(body),
+            "/api/cisco/disconnect": CISCO.disconnect,
         }.get(self.path)
         if action is None:
             return self.respond(404, {"error": "not found"})
@@ -725,7 +930,9 @@ PAGE = """<!doctype html>
   #toggle { width: 100%; margin: 1.2rem 0; padding: .8rem; font-size: 1.1rem; font-weight: 600; }
   .note { padding: .6rem .8rem; border-radius: .4rem; margin: 0 0 1rem; }
   #error { background: #cf222e22; }
-  #hint { background: #bf870022; }
+  #hint, #cisco-hint { background: #bf870022; }
+  .login { display: grid; grid-template-columns: 1fr 1fr 6rem auto; gap: .5rem; margin: 1rem 0; }
+  .login input { font: inherit; min-width: 0; padding: .4rem .6rem; border-radius: .5rem; border: 1px solid #8888; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: .4rem 1rem; margin: 0; }
   dt { opacity: .7; }
   dd { margin: 0; }
@@ -759,6 +966,25 @@ PAGE = """<!doctype html>
   <dt>Прокси GNOME</dt><dd id="proxy">—</dd>
   <dt>Внешний IP</dt><dd><span id="ip"></span> <button id="check">Проверить</button></dd>
 </dl>
+<div id="cisco" hidden>
+<h2>Рабочий VPN (Cisco)</h2>
+<dl>
+  <dt>Состояние</dt><dd id="cisco-state">—</dd>
+  <dt>Сервер</dt><dd id="cisco-host">—</dd>
+</dl>
+<form id="cisco-form" class="login" hidden>
+  <input id="cisco-user" name="username" autocomplete="username" placeholder="Логин" required>
+  <input id="cisco-password" name="password" type="password" autocomplete="current-password" placeholder="Пароль" required>
+  <input id="cisco-otp" name="otp" autocomplete="one-time-code" inputmode="numeric" placeholder="Код">
+  <button id="cisco-connect">Подключить</button>
+</form>
+<p id="cisco-actions" hidden><button id="cisco-disconnect">Отключить</button></p>
+<p id="cisco-hint" class="note" hidden></p>
+<p id="cisco-msg" class="note" hidden></p>
+<p class="foot">Через Cisco идут только рабочие сети — их задаёт сервер Cisco, остальное он не трогает.
+Рабочие сайты из списка «Всегда напрямую» (вкладка «Правила») идут мимо VPN-прокси и попадают в Cisco
+в любом режиме. Пароль и код никуда не сохраняются.</p>
+</div>
 <h2>Трафик по дням</h2>
 <table>
   <thead><tr><th>День</th><th>Через VPN</th><th>Напрямую</th></tr></thead>
@@ -790,10 +1016,15 @@ PAGE = """<!doctype html>
 <textarea id="rules-hosts" rows="14" spellcheck="false"></textarea>
 <p class="foot">По одному в строке: домен (youtube.com — вместе с поддоменами), IP или сеть
 (91.108.4.0/22). Можно и правила Xray: full:, keyword:, regexp:.</p>
+<h2>Всегда напрямую</h2>
+<textarea id="rules-direct" rows="3" spellcheck="false"></textarea>
+<p class="foot">Мимо VPN в любом режиме, даже для приложений из списка: например, рабочие сайты — они
+пойдут через Cisco, если он подключён. Формат тот же, что у хостов. Эти адреса попадают и в исключения
+системного прокси GNOME (кроме keyword: и regexp: — их GNOME не понимает).</p>
 <p><button id="rules-save">Сохранить и применить</button></p>
 <p id="rules-msg" class="note" hidden></p>
-<p class="foot">Хранится в .env (ROUTING_MODE, VPN_APPS, VPN_HOSTS); списки действуют только в режиме
-«по списку». Перед применением Xray проверяет конфиг; если VPN включён, контейнер перезапускается —
+<p class="foot">Хранится в .env (ROUTING_MODE, VPN_APPS, VPN_HOSTS, DIRECT_HOSTS); списки приложений
+и хостов действуют только в режиме «по списку». Перед применением Xray проверяет конфиг; если VPN включён, контейнер перезапускается —
 открытые соединения оборвутся, и программы переподключатся. Локальные сети всегда идут напрямую,
 а программы, которые не используют системный прокси (терминал, Claude Code), — напрямую в любом режиме.</p>
 </section>
@@ -942,7 +1173,7 @@ function render(s) {
   $('server').textContent = s.server ? s.server.name + ' · ' + kind(s.server) : 'не выбран';
   $('routing').textContent = s.routing.mode === 'filter'
     ? 'по списку: приложений ' + s.routing.apps.length + ', хостов ' + s.routing.hosts.length + ', остальное напрямую'
-    : 'всё, что идёт через прокси';
+    : 'всё, что идёт через прокси' + (s.routing.direct.length ? ', кроме «всегда напрямую»: ' + s.routing.direct.length : '');
   // Список перечитываем, только когда gen_config.py собрал новый конфиг.
   const key = s.servers_updated + '|' + (s.server && s.server.name);
   if (key !== serversKey) { serversKey = key; loadServers(); }
@@ -957,8 +1188,55 @@ function render(s) {
   else if (s.restarting) hint = 'Xray падает при запуске — смотрите docker compose logs';
   else if (!s.watcher) hint = 'Служба lan-vpn-proxy-watch не запущена: системный прокси GNOME не будет переключаться';
   note('hint', hint);
+  renderCisco(s.cisco);
   renderTraffic(s.traffic);
 }
+
+const CISCO_STATES = {Connected: 'подключён', Disconnected: 'отключён', Connecting: 'подключается…',
+                      Reconnecting: 'переподключается…', Disconnecting: 'отключается…'};
+
+function renderCisco(c) {
+  $('cisco').hidden = !c;  // Cisco Secure Client не установлен
+  if (!c) return;
+  const connected = c.state === 'Connected' || c.state === 'Reconnecting';
+  $('cisco-state').textContent = c.busy ? 'подключается…' : c.state ? CISCO_STATES[c.state] || c.state : 'узнаю…';
+  $('cisco-host').textContent = c.host || 'не задан — впишите CISCO_HOST в .env';
+  $('cisco-form').hidden = connected;
+  $('cisco-actions').hidden = !connected;
+  // Логин подставляем, только пока поле пустое: опрос раз в 3 секунды не должен мешать вводу.
+  if (!$('cisco-user').value && document.activeElement !== $('cisco-user')) $('cisco-user').value = c.user;
+  note('cisco-hint', !connected && c.gui
+    ? 'Открыто окно Cisco Secure Client — пока оно работает, подключиться отсюда не получится. Закройте его.' : '');
+}
+
+async function ciscoAction(action, button, label, body = {}) {
+  const text = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  try {
+    const r = await post('cisco/' + action, body);
+    $('cisco-msg').className = 'note ' + (r.ok ? 'ok' : 'err');
+    note('cisco-msg', r.message || (r.ok ? '' : 'Не получилось'));
+    render(r);
+    return r.ok;
+  } catch (e) {
+    $('cisco-msg').className = 'note err';
+    note('cisco-msg', 'Нет связи с веб-интерфейсом: ' + e);
+  } finally {
+    button.disabled = false;
+    button.textContent = text;
+  }
+}
+
+$('cisco-form').onsubmit = async e => {
+  e.preventDefault();
+  const ok = await ciscoAction('connect', $('cisco-connect'), 'Подключаю… до 2 мин',
+    {user: $('cisco-user').value, password: $('cisco-password').value, otp: $('cisco-otp').value});
+  // Код одноразовый, а пароль после входа больше не нужен.
+  $('cisco-otp').value = '';
+  if (ok) $('cisco-password').value = '';
+};
+$('cisco-disconnect').onclick = () => ciscoAction('disconnect', $('cisco-disconnect'), 'Отключаю…');
 
 async function poll() {
   if (!busy) {
@@ -1050,6 +1328,7 @@ async function loadRules() {
   for (const input of document.querySelectorAll('input[name=mode]')) input.checked = input.value === r.mode;
   $('rules-apps').value = r.apps.join('\\n');
   $('rules-hosts').value = r.hosts.join('\\n');
+  $('rules-direct').value = r.direct.join('\\n');
 }
 
 $('rules-save').onclick = async () => {
@@ -1058,7 +1337,8 @@ $('rules-save').onclick = async () => {
   $('rules-save').disabled = true;
   $('rules-save').textContent = 'Применяю…';
   try {
-    const r = await post('rules', {mode, apps: lines('rules-apps'), hosts: lines('rules-hosts')});
+    const r = await post('rules', {mode, apps: lines('rules-apps'), hosts: lines('rules-hosts'),
+                                   direct: lines('rules-direct')});
     $('rules-msg').className = 'note ' + (r.ok ? 'ok' : 'err');
     note('rules-msg', r.message || (r.ok ? '' : 'Не получилось'));
     if (r.ok) await loadRules();

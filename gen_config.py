@@ -85,7 +85,7 @@ def setting(dotenv, key, default=None):
 
 
 def split_list(value):
-    """«a, b,c» → ["a", "b", "c"]: так в .env хранятся списки VPN_APPS и VPN_HOSTS."""
+    """«a, b,c» → ["a", "b", "c"]: так в .env хранятся списки VPN_APPS, VPN_HOSTS и DIRECT_HOSTS."""
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
@@ -102,16 +102,17 @@ def config_settings(dotenv):
             "mode": setting(dotenv, "ROUTING_MODE", "all"),
             "apps": split_list(setting(dotenv, "VPN_APPS")),
             "hosts": split_list(setting(dotenv, "VPN_HOSTS")),
+            "direct": split_list(setting(dotenv, "DIRECT_HOSTS")),
         },
     }
 
 
-# Префиксы правил Xray, которые можно писать в VPN_HOSTS как есть.
+# Префиксы правил Xray, которые можно писать в VPN_HOSTS и DIRECT_HOSTS как есть.
 DOMAIN_PREFIXES = ("domain:", "full:", "keyword:", "regexp:")
 
 
 def host_rules(hosts):
-    """Записи VPN_HOSTS → (домены, сети) для правил Xray. youtube.com — вместе с поддоменами."""
+    """Записи VPN_HOSTS или DIRECT_HOSTS → (домены, сети) для правил Xray. youtube.com — вместе с поддоменами."""
     domains, networks = [], []
     for host in hosts:
         try:
@@ -315,9 +316,16 @@ def read_source(source, user_agent):
 
 
 def routing_rules(routing):
-    """Локальные сети — всегда напрямую. Режим all: остальное через VPN (первый outbound).
+    """Локальные сети и DIRECT_HOSTS — всегда напрямую. Режим all: остальное через VPN (первый outbound).
     Режим filter: через VPN только приложения и хосты из списков, остальное напрямую."""
     rules = [{"type": "field", "ip": PRIVATE_NETS, "outboundTag": "direct"}]
+    # Раньше правил VPN: правило, совпавшее первым, и решает. Так рабочие сайты идут через Cisco,
+    # даже если их открывает приложение из VPN_APPS.
+    domains, networks = host_rules(routing["direct"])
+    if domains:
+        rules.append({"type": "field", "domain": domains, "outboundTag": "direct"})
+    if networks:
+        rules.append({"type": "field", "ip": networks, "outboundTag": "direct"})
     if routing["mode"] != "filter":
         return rules
     domains, networks = host_rules(routing["hosts"])
