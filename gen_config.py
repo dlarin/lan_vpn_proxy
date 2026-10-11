@@ -8,6 +8,8 @@ SOURCE, если указан, заменяет SUBSCRIPTION: URL подписк
 import argparse
 import base64
 import binascii
+import copy
+import datetime
 import json
 import os
 import sys
@@ -17,6 +19,10 @@ from urllib.parse import unquote, urlsplit
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(PROJECT_DIR, ".env")
 DEFAULT_OUTPUT = os.path.join(PROJECT_DIR, "xray", "config.json")
+# Не в xray/: Xray читает оттуда все *.json как конфиги.
+SERVERS_FILE = os.path.join(PROJECT_DIR, "data", "servers.json")
+# Все серверы вместе с ключами — для проверки из веб-интерфейса; в браузер не отдаётся.
+OUTBOUNDS_FILE = os.path.join(PROJECT_DIR, "data", "outbounds.json")
 DEFAULT_USER_AGENT = "v2rayN/7.13.8"
 LINK_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
 SERVICE_PROTOCOLS = {"freedom", "blackhole", "dns", "loopback"}
@@ -49,6 +55,30 @@ def load_env(path):
                 value = value.split(" #", 1)[0].strip()
             values[key.strip()] = value
     return values
+
+
+def set_env_value(path, key, value):
+    """Меняет KEY= в .env, сохраняя остальные строки и комментарии; если строки нет — дописывает."""
+    quote = '"' if "'" in value else "'"
+    new_line = f"{key}={quote}{value}{quote}\n"
+    lines = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("#") and stripped.partition("=")[0].strip() == key:
+            lines[i] = new_line
+            break
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(new_line)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.replace(tmp, path)
 
 
 def setting(dotenv, key, default=None):
@@ -273,23 +303,61 @@ def build_config(server):
     }
 
 
+def build_check_config(chains, first_port):
+    """Конфиг для проверки серверов: на порту first_port + i — HTTP-прокси через i-й сервер."""
+    inbounds, outbounds, rules = [], [], []
+    for i, chain in enumerate(chains):
+        # У каждого сервера свои теги, чтобы цепочки dialerProxy разных серверов не пересеклись.
+        tags = {o.get("tag"): f"s{i}-{j}" for j, o in enumerate(chain)}
+        for outbound in chain:
+            outbound = copy.deepcopy(outbound)
+            outbound["tag"] = tags[outbound.get("tag")]
+            sockopt = outbound.get("streamSettings", {}).get("sockopt", {})
+            if sockopt.get("dialerProxy") in tags:
+                sockopt["dialerProxy"] = tags[sockopt["dialerProxy"]]
+            outbounds.append(outbound)
+        inbounds.append({"tag": f"in{i}", "listen": "0.0.0.0", "port": first_port + i, "protocol": "http"})
+        rules.append({"type": "field", "inboundTag": [f"in{i}"], "outboundTag": tags[chain[0].get("tag")]})
+    return {"log": {"loglevel": "warning"}, "inbounds": inbounds, "outbounds": outbounds, "routing": {"rules": rules}}
+
+
+def describe(server):
+    """Сведения о сервере без ключей — для --list и веб-интерфейса."""
+    outbound = server["outbounds"][0]
+    settings = outbound.get("settings", {})
+    target = (settings.get("vnext") or settings.get("servers") or [settings])[0]
+    stream = outbound.get("streamSettings", {})
+    return {
+        "name": server["name"],
+        "protocol": outbound.get("protocol"),
+        "network": stream.get("network", "tcp"),
+        "security": stream.get("security", "none"),
+        "address": target.get("address"),
+        "port": target.get("port"),
+    }
+
+
 def pick(servers, choice):
     if not choice:
         return servers[0]
     if choice.isdigit() and 1 <= int(choice) <= len(servers):
         return servers[int(choice) - 1]
+    # Полное название (его пишет веб-интерфейс) важнее совпадения по части.
+    matches = [s for s in servers if s["name"] == choice]
+    if len(matches) == 1:
+        return matches[0]
     matches = [s for s in servers if choice.lower() in s["name"].lower()]
     if len(matches) != 1:
         sys.exit(f"по «{choice}» найдено серверов: {len(matches)}; посмотрите список через --list")
     return matches[0]
 
 
-def write_config(path, config):
+def write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
     os.replace(tmp, path)
 
@@ -314,11 +382,19 @@ def main():
         sys.exit("серверы не найдены; если это подписка, попробуйте другой --user-agent")
     if args.list:
         for i, server in enumerate(servers, 1):
-            print(f"{i:3}  {server['name']}")
+            d = describe(server)
+            kind = "/".join(x for x in (d["protocol"], d["network"], d["security"]) if x and x != "none")
+            print(f"{i:3}  {d['name']}  ({kind}, {d['address']}:{d['port']})")
         return
 
     server = pick(servers, args.server)
-    write_config(args.output, build_config(server))
+    write_json(args.output, build_config(server))
+    write_json(SERVERS_FILE, {
+        "updated": datetime.datetime.now().isoformat(timespec="minutes"),
+        "current": servers.index(server),
+        "servers": [describe(s) for s in servers],
+    })
+    write_json(OUTBOUNDS_FILE, [s["outbounds"] for s in servers])
     print(f"сервер: {server['name']}\nконфиг: {args.output}\nприменить: docker compose up -d --force-recreate")
 
 

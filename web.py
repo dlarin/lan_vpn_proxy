@@ -2,20 +2,25 @@
 """Веб-интерфейс для включения и выключения lan-vpn-proxy: http://127.0.0.1:WEB_PORT.
 
 Кнопка запускает и останавливает контейнер; системный прокси GNOME вслед за ним
-переключает proxy-watch.sh. Заодно раз в минуту записывает трафик по дням
-в data/traffic.json. Только стандартная библиотека Python.
+переключает proxy-watch.sh. Ещё здесь обновление подписки, проверка серверов
+и трафик по дням (замер раз в минуту в data/traffic.json). Только стандартная библиотека Python.
 """
 import datetime
 import http.client
 import json
 import os
+import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from gen_config import DEFAULT_OUTPUT, ENV_FILE, PROJECT_DIR, STATS_API, load_env, setting
+from gen_config import (DEFAULT_OUTPUT, ENV_FILE, OUTBOUNDS_FILE, PROJECT_DIR, SERVERS_FILE, STATS_API,
+                        build_check_config, build_config, load_env, set_env_value, setting, write_json)
 
 CONTAINER = "lan-vpn-proxy"
 WATCH_SERVICE = "lan-vpn-proxy-watch.service"
@@ -24,6 +29,10 @@ TRAFFIC_FILE = os.path.join(PROJECT_DIR, "data", "traffic.json")
 TRAFFIC_INTERVAL = 60  # секунд между замерами
 TRAFFIC_DAYS_KEPT = 90
 TRAFFIC_DAYS_SHOWN = 7
+CHECK_CONTAINER = "lan-vpn-proxy-check"
+CHECK_FIRST_PORT = 20801  # проверка занимает 127.0.0.1:20801… — по порту на сервер
+CHECK_URL = "https://www.gstatic.com/generate_204"
+CHECK_TIMEOUT = 8
 
 dotenv = load_env(ENV_FILE)
 WEB_PORT = int(setting(dotenv, "WEB_PORT", "8765"))
@@ -33,6 +42,9 @@ HTTP_PORT = setting(dotenv, "HTTP_PORT", "3128")
 ALLOWED_HOSTS = {f"127.0.0.1:{WEB_PORT}", f"localhost:{WEB_PORT}"}
 ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 ACTION_LOCK = threading.Lock()
+CHECK_LOCK = threading.Lock()
+# Результат последней проверки: задержка в мс по названию сервера, None — не работает.
+last_check = {"time": None, "delays": {}}
 
 
 def run(*cmd, timeout=60):
@@ -159,10 +171,138 @@ class Traffic:
 TRAFFIC = Traffic(TRAFFIC_FILE)
 
 
+def load_servers():
+    """Список серверов, который сохранил gen_config.py; None — конфиг ещё не собирали."""
+    try:
+        with open(SERVERS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def load_chains():
+    """Outbound-ы всех серверов с ключами; [] — нет данных или они не совпадают со списком."""
+    try:
+        with open(OUTBOUNDS_FILE, encoding="utf-8") as f:
+            chains = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return []
+    return chains if len(chains) == len((load_servers() or {}).get("servers", [])) else []
+
+
+def servers_info():
+    """Список серверов для страницы — вместе с результатом последней проверки."""
+    return {**(load_servers() or {"servers": []}), "check": last_check}
+
+
+def select_server(index):
+    servers, chains = load_servers(), load_chains()
+    if not chains:
+        return False, "Нет данных о серверах — нажмите «Обновить подписку»"
+    if not isinstance(index, int) or not 0 <= index < len(chains):
+        return False, "Нет такого сервера"
+    name = servers["servers"][index]["name"]
+    with ACTION_LOCK:
+        write_json(DEFAULT_OUTPUT, build_config({"outbounds": chains[index]}))
+        write_json(SERVERS_FILE, {**servers, "current": index})
+        # Иначе «Обновить подписку» и ./gen_config.py вернули бы прежний сервер.
+        set_env_value(ENV_FILE, "SERVER", name)
+        if not container_state()["running"]:
+            return True, f"Выбран сервер {name}. VPN выключен — включите его на главной вкладке."
+        ok, _, err = run("docker", "compose", "up", "-d", "--force-recreate")
+    return (True, f"VPN переключён на {name}.") if ok else (False, err)
+
+
+def comparable_config():
+    """Конфиг без shortId: подписка каждый раз выдаёт другой, а работают все."""
+    try:
+        with open(DEFAULT_OUTPUT, encoding="utf-8") as f:
+            config = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return None
+    for outbound in config.get("outbounds", []):
+        outbound.get("streamSettings", {}).get("realitySettings", {}).pop("shortId", None)
+    return config
+
+
+def update_subscription():
+    before = comparable_config()
+    with ACTION_LOCK:
+        ok, _, err = run(sys.executable, os.path.join(PROJECT_DIR, "gen_config.py"), timeout=90)
+        if not ok:
+            return False, err
+        message = f"Подписка обновлена, серверов: {len(servers_info()['servers'])}."
+        if comparable_config() != before and container_state()["running"]:
+            ok, _, err = run("docker", "compose", "up", "-d", "--force-recreate")
+            if not ok:
+                return False, err
+            message += " Настройки сервера изменились — контейнер перезапущен."
+    return True, message
+
+
+def probe(port):
+    """Задержка запроса через прокси на этом порту, мс; None — сервер не работает."""
+    proxy = f"http://127.0.0.1:{port}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    start = time.monotonic()
+    try:
+        with opener.open(CHECK_URL, timeout=CHECK_TIMEOUT) as response:
+            response.read()
+    except (OSError, http.client.HTTPException):
+        return None
+    return round((time.monotonic() - start) * 1000)
+
+
+def wait_started(container, timeout=10):
+    # Порт на хосте Docker открывает раньше, чем Xray начнёт слушать, поэтому ждём строку в журнале.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _, out, err = run("docker", "logs", container, timeout=5)
+        if " started" in out + err:
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def check_servers():
+    """Настоящая проверка: временный Xray, где каждый сервер — HTTP-прокси на своём порту, и запрос через каждый."""
+    if not CHECK_LOCK.acquire(blocking=False):
+        return False, "Проверка уже идёт"
+    tmp = tempfile.mkdtemp(prefix="lvp-check-")
+    try:
+        servers, chains = servers_info()["servers"], load_chains()
+        if not chains:
+            return False, "Нет данных для проверки — нажмите «Обновить подписку»"
+        write_json(os.path.join(tmp, "config.json"), build_check_config(chains, CHECK_FIRST_PORT))
+        ports = range(CHECK_FIRST_PORT, CHECK_FIRST_PORT + len(chains))
+        _, image, _ = run("docker", "compose", "config", "--images")
+        run("docker", "rm", "-f", CHECK_CONTAINER)  # остаток прерванной проверки
+        ok, _, err = run("docker", "run", "-d", "--rm", "--name", CHECK_CONTAINER,
+                         "--user", f"{os.getuid()}:{os.getgid()}",
+                         "-p", f"127.0.0.1:{ports[0]}-{ports[-1]}:{ports[0]}-{ports[-1]}",
+                         "-v", f"{tmp}:/usr/local/etc/xray:ro", image)
+        if not ok:
+            return False, err
+        try:
+            if not wait_started(CHECK_CONTAINER):
+                return False, "Xray для проверки не запустился"
+            with ThreadPoolExecutor(max_workers=len(chains)) as pool:
+                delays = list(pool.map(probe, ports))
+        finally:
+            run("docker", "rm", "-f", CHECK_CONTAINER)
+        last_check.update(time=datetime.datetime.now().isoformat(timespec="minutes"),
+                          delays={s["name"]: d for s, d in zip(servers, delays)})
+        return True, f"Работают {sum(d is not None for d in delays)} из {len(delays)}."
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        CHECK_LOCK.release()
+
+
 def status():
     _, mode, _ = run("gsettings", "get", "org.gnome.system.proxy", "mode", timeout=5)
     _, port, _ = run("gsettings", "get", "org.gnome.system.proxy.http", "port", timeout=5)
     _, watcher, _ = run("systemctl", "--user", "is-active", WATCH_SERVICE, timeout=5)
+    servers = load_servers()
     return {
         **container_state(),
         "config": os.path.isfile(DEFAULT_OUTPUT),
@@ -171,6 +311,8 @@ def status():
         "http_port": HTTP_PORT,
         "watcher": watcher == "active",
         "traffic": TRAFFIC.summary(),
+        "server": servers["servers"][servers["current"]] if servers else None,
+        "servers_updated": servers["updated"] if servers else None,
     }
 
 
@@ -236,13 +378,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, status())
         if self.path == "/api/ip":
             return self.respond(200, check_ip())
+        if self.path == "/api/servers":
+            return self.respond(200, servers_info())
         self.respond(404, {"error": "not found"})
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         if not self.allowed(action=True):
             return self.respond(403, {"error": "forbidden"})
-        action = {"/api/on": turn_on, "/api/off": turn_off}.get(self.path)
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return self.respond(400, {"error": "bad json"})
+        action = {
+            "/api/on": turn_on,
+            "/api/off": turn_off,
+            "/api/update": update_subscription,
+            "/api/check": check_servers,
+            "/api/select": lambda: select_server(body.get("index") if isinstance(body, dict) else None),
+        }.get(self.path)
         if action is None:
             return self.respond(404, {"error": "not found"})
         ok, message = action()
@@ -261,8 +415,13 @@ PAGE = """<!doctype html>
 <title>VPN-прокси</title>
 <style>
   :root { color-scheme: light dark; --on: #1a7f37; --off: #8c959f; --warn: #bf8700; }
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 30rem; margin: 3rem auto; padding: 0 1rem; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
   h1 { font-size: 1rem; font-weight: 500; opacity: .7; margin: 0 0 1rem; }
+  nav { display: flex; gap: 1.2rem; border-bottom: 1px solid #8884; margin: 0 0 1.5rem; }
+  nav a { padding: .4rem 0; margin-bottom: -1px; color: inherit; text-decoration: none; opacity: .7;
+          border-bottom: 2px solid transparent; }
+  nav a[aria-current] { opacity: 1; font-weight: 600; border-bottom-color: currentColor; }
+  td button { padding: .2rem .6rem; font-size: .9rem; }
   .state { display: flex; align-items: center; gap: .6rem; font-size: 1.6rem; font-weight: 600; }
   .dot { width: .9rem; height: .9rem; border-radius: 50%; background: var(--off); flex: none; }
   .on .dot { background: var(--on); }
@@ -282,16 +441,24 @@ PAGE = """<!doctype html>
   th { font-weight: 500; opacity: .7; }
   td { font-variant-numeric: tabular-nums; }
   .foot { font-size: .85rem; opacity: .7; }
+  .addr { display: block; font-size: .8rem; opacity: .6; }
+  tr.current td { font-weight: 600; }
+  .ok { background: #1a7f3722; }
+  .err { background: #cf222e22; }
+  code { font-size: .9em; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <h1>lan-vpn-proxy</h1>
+<nav><a href="#" id="nav-main">Главная</a><a href="#servers" id="nav-servers">Серверы</a></nav>
+<section id="tab-main">
 <div id="state" class="state"><span class="dot"></span><span id="state-text">Загрузка…</span></div>
 <button id="toggle" disabled>…</button>
 <p id="error" class="note" hidden></p>
 <p id="hint" class="note" hidden></p>
 <dl>
+  <dt>Сервер</dt><dd><span id="server">—</span> <a href="#servers">сменить</a></dd>
   <dt>Контейнер</dt><dd id="container">—</dd>
   <dt>Прокси GNOME</dt><dd id="proxy">—</dd>
   <dt>Внешний IP</dt><dd><span id="ip"></span> <button id="check">Проверить</button></dd>
@@ -303,11 +470,28 @@ PAGE = """<!doctype html>
 </table>
 <p class="foot">↓ получено, ↑ отправлено. «Напрямую» — приблизительно: сюда же попадают
 локальная сеть и накладные расходы шифрования VPN. Замер раз в минуту.</p>
+</section>
+<section id="tab-servers" hidden>
+<p><button id="update">Обновить подписку</button> <button id="test">Проверить серверы</button></p>
+<p id="servers-msg" class="note" hidden></p>
+<table>
+  <thead><tr><th>№</th><th>Сервер</th><th>Подключение</th><th>Задержка</th><th></th></tr></thead>
+  <tbody id="servers"></tbody>
+</table>
+<p class="foot"><span id="servers-updated"></span> «Выбрать» переключает VPN на сервер и записывает его
+в <code>SERVER</code> в .env; если VPN включён, связь пропадёт на пару секунд. Проверка делает настоящий
+запрос через каждый сервер, задержка — время до ответа; сверху самые быстрые. № — номер в подписке.</p>
+</section>
 <script>
 const $ = id => document.getElementById(id);
-let busy = false, last = null;
+let busy = false, last = null, servers = [], current = -1, check = {delays: {}}, serversKey = null;
 
 function note(id, text) { $(id).textContent = text; $(id).hidden = !text; }
+
+function post(action, body = {}) {
+  return fetch('/api/' + action, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
+    .then(r => r.json());
+}
 
 function size(bytes) {
   const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
@@ -316,27 +500,93 @@ function size(bytes) {
   return bytes.toLocaleString('ru', {maximumFractionDigits: i && bytes < 10 ? 1 : 0}) + ' ' + units[i];
 }
 
+function row(cells, className) {
+  const tr = document.createElement('tr');
+  tr.className = className || '';
+  for (const cell of cells) {
+    const td = document.createElement('td');
+    td.append(cell);
+    tr.append(td);
+  }
+  return tr;
+}
+
+function emptyRow(text, columns) {
+  const tr = row([text]);
+  tr.firstChild.colSpan = columns;
+  return tr;
+}
+
 function renderTraffic(days) {
   const today = new Date().toLocaleDateString('sv');  // ГГГГ-ММ-ДД в местном времени
-  const rows = days.map(d => {
-    const tr = document.createElement('tr');
-    const label = d.date === today ? 'сегодня' : d.date.slice(8) + '.' + d.date.slice(5, 7);
-    for (const text of [label, size(d.vpn_down) + ' ↓ ' + size(d.vpn_up) + ' ↑',
-                        size(d.direct_down) + ' ↓ ' + size(d.direct_up) + ' ↑']) {
-      const td = document.createElement('td');
-      td.textContent = text;
-      tr.append(td);
-    }
-    return tr;
+  const rows = days.map(d => row([
+    d.date === today ? 'сегодня' : d.date.slice(8) + '.' + d.date.slice(5, 7),
+    size(d.vpn_down) + ' ↓ ' + size(d.vpn_up) + ' ↑',
+    size(d.direct_down) + ' ↓ ' + size(d.direct_up) + ' ↑',
+  ]));
+  $('traffic').replaceChildren(...(rows.length ? rows : [emptyRow('Данных пока нет — первый замер через минуту', 3)]));
+}
+
+function kind(s) {
+  return [s.protocol, s.network, s.security === 'none' ? '' : s.security].filter(Boolean).join(' · ').toUpperCase();
+}
+
+// undefined — не проверяли, null — не работает
+function delayOf(i) { return check.delays[servers[i].name]; }
+
+function renderServers() {
+  const rank = d => d === undefined ? 1 : d === null ? 2 : 0;
+  // Сверху рабочие по возрастанию задержки, затем непроверенные, внизу нерабочие.
+  const order = servers.map((_, i) => i).sort((a, b) => {
+    const da = delayOf(a), db = delayOf(b);
+    return rank(da) - rank(db) || (rank(da) ? 0 : da - db) || a - b;
   });
-  if (!rows.length) {
-    const tr = document.createElement('tr'), td = document.createElement('td');
-    td.colSpan = 3;
-    td.textContent = 'Данных пока нет — первый замер через минуту';
-    tr.append(td);
-    rows.push(tr);
+  const rows = order.map(i => {
+    const s = servers[i], d = delayOf(i);
+    const name = document.createElement('span'), addr = document.createElement('span');
+    name.textContent = s.name;
+    addr.className = 'addr';
+    addr.textContent = s.address + ':' + s.port;
+    name.append(addr);
+    const delay = d === undefined ? '—' : d === null ? 'не работает' : d + ' мс';
+    let action = 'текущий';
+    if (i !== current) {
+      action = document.createElement('button');
+      action.textContent = 'Выбрать';
+      action.onclick = () => serverAction('select', action, 'Переключаю…', {index: i});
+    }
+    return row([String(i + 1), name, kind(s), delay, action], i === current ? 'current' : '');
+  });
+  $('servers').replaceChildren(...(rows.length ? rows : [emptyRow('Список появится после «Обновить подписку»', 5)]));
+}
+
+async function loadServers() {
+  const info = await (await fetch('/api/servers')).json();
+  servers = info.servers;
+  current = info.current;
+  check = info.check;
+  renderServers();
+  const when = t => new Date(t).toLocaleString('ru', {dateStyle: 'short', timeStyle: 'short'});
+  $('servers-updated').textContent =
+    (info.updated ? 'Обновлено ' + when(info.updated) + ', серверов: ' + servers.length + '.' : '') +
+    (check.time ? ' Проверено ' + when(check.time) + '.' : '');
+}
+
+async function serverAction(action, button, label, body) {
+  const text = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  try {
+    const r = await post(action, body);
+    $('servers-msg').className = 'note ' + (r.ok ? 'ok' : 'err');
+    note('servers-msg', r.message || (r.ok ? '' : 'Не получилось'));
+    await loadServers();
+  } catch (e) {
+    $('servers-msg').className = 'note err';
+    note('servers-msg', 'Нет связи с веб-интерфейсом: ' + e);
   }
-  $('traffic').replaceChildren(...rows);
+  button.disabled = false;
+  button.textContent = text;
 }
 
 function render(s) {
@@ -347,6 +597,10 @@ function render(s) {
   $('toggle').textContent = active ? 'Выключить' : 'Включить';
   $('toggle').disabled = busy;
   $('container').textContent = s.status;
+  $('server').textContent = s.server ? s.server.name + ' · ' + kind(s.server) : 'не выбран';
+  // Список перечитываем, только когда gen_config.py собрал новый конфиг.
+  const key = s.servers_updated + '|' + (s.server && s.server.name);
+  if (key !== serversKey) { serversKey = key; loadServers(); }
   let proxy = 'выключен — трафик напрямую';
   if (s.proxy_mode === 'manual') {
     proxy = 'включён, 127.0.0.1:' + s.proxy_port;
@@ -375,8 +629,7 @@ $('toggle').onclick = async () => {
   $('toggle').disabled = true;
   $('toggle').textContent = action === 'on' ? 'Включаю…' : 'Выключаю…';
   try {
-    const r = await fetch('/api/' + action, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-    const s = await r.json();
+    const s = await post(action);
     note('error', s.ok ? '' : s.message || 'Не получилось');
     busy = false;
     render(s);
@@ -398,6 +651,22 @@ $('check').onclick = async () => {
   }
   $('check').disabled = false;
 };
+
+$('update').onclick = () => serverAction('update', $('update'), 'Обновляю…');
+$('test').onclick = () => serverAction('check', $('test'), 'Проверяю… до 15 с');
+
+// Вкладка хранится в адресе (#servers), поэтому переживает перезагрузку страницы.
+function showTab() {
+  const onServers = location.hash === '#servers';
+  $('tab-main').hidden = onServers;
+  $('tab-servers').hidden = !onServers;
+  for (const [id, active] of [['nav-main', !onServers], ['nav-servers', onServers]]) {
+    if (active) $(id).setAttribute('aria-current', 'page');
+    else $(id).removeAttribute('aria-current');
+  }
+}
+window.addEventListener('hashchange', showTab);
+showTab();
 
 poll();
 </script>
