@@ -8,6 +8,11 @@ services:
     # Сеть хоста: Xray сам слушает BIND_ADDR, SOCKS_PORT и HTTP_PORT из .env (gen_config.py
     # пишет их в конфиг) и видит настоящий порт программы — по нему web.py узнаёт приложение.
     network_mode: host
+    # Правила по приложениям (VPN_APPS): Xray ищет процесс соединения в /proc хоста. Для этого
+    # нужно видеть процессы хоста, а профиль AppArmor docker-default не даёт читать их /proc/<pid>/fd.
+    pid: host
+    security_opt:
+      - apparmor=unconfined
     volumes:
       - ./xray:/usr/local/etc/xray:ro
     # Журнал подключений web.py раз в минуту переносит в data/hosts.json, поэтому

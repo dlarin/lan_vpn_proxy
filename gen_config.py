@@ -10,6 +10,7 @@ import base64
 import binascii
 import copy
 import datetime
+import ipaddress
 import json
 import os
 import sys
@@ -83,13 +84,41 @@ def setting(dotenv, key, default=None):
     return os.environ.get(key) or dotenv.get(key) or default
 
 
-def listen_settings(dotenv):
-    """Где слушает прокси. Контейнер работает в сети хоста, поэтому адрес и порты — прямо в конфиге Xray."""
+def split_list(value):
+    """«a, b,c» → ["a", "b", "c"]: так в .env хранятся списки VPN_APPS и VPN_HOSTS."""
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def config_settings(dotenv):
+    """Настройки из .env, которые build_config пишет в конфиг Xray.
+
+    Контейнер работает в сети хоста, поэтому адрес и порты прокси — прямо в конфиге.
+    """
     return {
         "listen": setting(dotenv, "BIND_ADDR", "127.0.0.1"),
         "socks_port": int(setting(dotenv, "SOCKS_PORT", "1080")),
         "http_port": int(setting(dotenv, "HTTP_PORT", "3128")),
+        "routing": {
+            "mode": setting(dotenv, "ROUTING_MODE", "all"),
+            "apps": split_list(setting(dotenv, "VPN_APPS")),
+            "hosts": split_list(setting(dotenv, "VPN_HOSTS")),
+        },
     }
+
+
+# Префиксы правил Xray, которые можно писать в VPN_HOSTS как есть.
+DOMAIN_PREFIXES = ("domain:", "full:", "keyword:", "regexp:")
+
+
+def host_rules(hosts):
+    """Записи VPN_HOSTS → (домены, сети) для правил Xray. youtube.com — вместе с поддоменами."""
+    domains, networks = [], []
+    for host in hosts:
+        try:
+            networks.append(str(ipaddress.ip_network(host, strict=False)))
+        except ValueError:
+            domains.append(host if host.startswith(DOMAIN_PREFIXES) else f"domain:{host.lower()}")
+    return domains, networks
 
 
 def b64decode(text):
@@ -285,18 +314,37 @@ def read_source(source, user_agent):
     return text
 
 
-def build_config(server, listen, socks_port, http_port):
+def routing_rules(routing):
+    """Локальные сети — всегда напрямую. Режим all: остальное через VPN (первый outbound).
+    Режим filter: через VPN только приложения и хосты из списков, остальное напрямую."""
+    rules = [{"type": "field", "ip": PRIVATE_NETS, "outboundTag": "direct"}]
+    if routing["mode"] != "filter":
+        return rules
+    domains, networks = host_rules(routing["hosts"])
+    if domains:
+        rules.append({"type": "field", "domain": domains, "outboundTag": "proxy"})
+    if networks:
+        rules.append({"type": "field", "ip": networks, "outboundTag": "proxy"})
+    # Процесс Xray ищет перебором /proc на каждое соединение, поэтому это правило после дешёвых.
+    if routing["apps"]:
+        rules.append({"type": "field", "process": routing["apps"], "outboundTag": "proxy"})
+    rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "direct"})
+    return rules
+
+
+def build_config(server, listen, socks_port, http_port, routing):
     outbounds = list(server["outbounds"])
     if not any(o.get("tag") == "direct" for o in outbounds):
         outbounds.append({"tag": "direct", "protocol": "freedom"})
     sniffing = {"enabled": True, "destOverride": ["http", "tls"]}
     return {
         "log": {"loglevel": "warning"},
-        # Счётчики байт по inbound: всё, что пришло в прокси. Счётчики outbound не годятся:
-        # с XTLS Vision данные после рукопожатия идут в обход них.
+        # Через VPN = всё, что пришло в прокси (inbound), минус ушедшее напрямую (outbound direct).
+        # Счётчики outbound proxy не годятся: с XTLS Vision данные после рукопожатия идут в обход них.
         "stats": {},
         "api": {"tag": "api", "listen": STATS_API, "services": ["StatsService"]},
-        "policy": {"system": {"statsInboundUplink": True, "statsInboundDownlink": True}},
+        "policy": {"system": {"statsInboundUplink": True, "statsInboundDownlink": True,
+                              "statsOutboundUplink": True, "statsOutboundDownlink": True}},
         "inbounds": [
             {"tag": "socks", "listen": listen, "port": socks_port, "protocol": "socks",
              "settings": {"auth": "noauth", "udp": False}, "sniffing": sniffing},
@@ -304,8 +352,7 @@ def build_config(server, listen, socks_port, http_port):
              "settings": {}, "sniffing": sniffing},
         ],
         "outbounds": outbounds,
-        # Всё, кроме локальных сетей, уходит в первый outbound — VPN.
-        "routing": {"rules": [{"type": "field", "ip": PRIVATE_NETS, "outboundTag": "direct"}]},
+        "routing": {"rules": routing_rules(routing)},
     }
 
 
@@ -394,7 +441,7 @@ def main():
         return
 
     server = pick(servers, args.server)
-    write_json(args.output, build_config(server, **listen_settings(dotenv)))
+    write_json(args.output, build_config(server, **config_settings(dotenv)))
     write_json(SERVERS_FILE, {
         "updated": datetime.datetime.now().isoformat(timespec="minutes"),
         "current": servers.index(server),

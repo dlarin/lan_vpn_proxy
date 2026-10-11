@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from gen_config import (DEFAULT_OUTPUT, ENV_FILE, OUTBOUNDS_FILE, PROJECT_DIR, SERVERS_FILE, STATS_API,
-                        build_check_config, build_config, listen_settings, load_env, set_env_value, setting,
+                        build_check_config, build_config, config_settings, load_env, set_env_value, setting,
                         write_json)
 
 CONTAINER = "lan-vpn-proxy"
@@ -86,19 +86,23 @@ def container_state():
 
 
 def read_vpn_bytes():
-    """(отправлено, получено) через прокси с прошлого замера; счётчики Xray при этом обнуляются."""
+    """(отправлено, получено) через VPN с прошлого замера; счётчики Xray при этом обнуляются.
+
+    Через VPN = всё, что пришло в прокси, минус ушедшее с него напрямую (локальные сети,
+    а в режиме filter — всё не из списков).
+    """
     ok, out, _ = run("docker", "exec", CONTAINER, "xray", "api", "statsquery",
-                     f"--server={STATS_API}", "-pattern", "inbound>>>", "-reset", timeout=10)
+                     f"--server={STATS_API}", "-reset", timeout=10)
     if not ok:
         return 0, 0  # контейнер выключен — через VPN ничего не прошло
-    up = down = 0
+    totals = collections.Counter()
     for stat in json.loads(out).get("stat", []):
-        # Нулевые значения Xray не выводит вовсе.
-        if stat["name"].endswith(">>>uplink"):
-            up += int(stat.get("value", 0))
-        elif stat["name"].endswith(">>>downlink"):
-            down += int(stat.get("value", 0))
-    return up, down
+        kind, tag, _, direction = stat["name"].split(">>>")
+        if kind == "inbound" or (kind == "outbound" and tag == "direct"):
+            # Нулевые значения Xray не выводит вовсе.
+            totals[kind, direction] += int(stat.get("value", 0))
+    return (max(totals["inbound", "uplink"] - totals["outbound", "uplink"], 0),
+            max(totals["inbound", "downlink"] - totals["outbound", "downlink"], 0))
 
 
 def read_nic_bytes():
@@ -213,14 +217,13 @@ class ClientSockets:
         self.names = {}  # pid → название приложения
 
     def app_name(self, pid):
+        # Имя исполняемого файла — то же, с чем сравнивает правила VPN_APPS сам Xray.
         if pid not in self.names:
             try:
-                with open(f"/proc/{pid}/cmdline", "rb") as f:
-                    argv0 = f.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+                name = os.path.basename(os.readlink(f"/proc/{pid}/exe")).removesuffix(" (deleted)")
             except OSError:
-                argv0 = ""
-            # Chrome и Electron переписывают cmdline одной строкой с аргументами через пробел.
-            self.names[pid] = os.path.basename(argv0.split(" ", 1)[0]) or f"pid {pid}"
+                name = ""
+            self.names[pid] = name or f"pid {pid}"
         return self.names[pid]
 
     def poll(self):
@@ -385,22 +388,95 @@ def servers_info():
     return {**(load_servers() or {"servers": []}), "check": last_check}
 
 
-def select_server(index):
+def test_config(config):
+    """Ошибка Xray для этого конфига или None — чтобы неверная запись в списках не уронила VPN."""
+    tmp = tempfile.mkdtemp(prefix="lvp-test-")
+    try:
+        write_json(os.path.join(tmp, "config.json"), config)
+        _, image, _ = run("docker", "compose", "config", "--images")
+        ok, out, err = run("docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+                           "-v", f"{tmp}:/c:ro", image, "run", "-test", "-c", "/c/config.json", timeout=30)
+        if ok:
+            return None
+        failed = [line for line in (out + "\n" + err).splitlines() if "ailed" in line]
+        return (failed[-1] if failed else err or out)[-400:]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def write_server_config(index, settings):
+    """Собирает и проверяет конфиг для сервера index; (ошибка или None)."""
     servers, chains = load_servers(), load_chains()
     if not chains:
-        return False, "Нет данных о серверах — нажмите «Обновить подписку»"
+        return "Нет данных о серверах — нажмите «Обновить подписку»"
     if not isinstance(index, int) or not 0 <= index < len(chains):
-        return False, "Нет такого сервера"
-    name = servers["servers"][index]["name"]
+        return "Нет такого сервера"
+    config = build_config({"outbounds": chains[index]}, **settings)
+    error = test_config(config)
+    if error:
+        return f"Xray не принял конфиг: {error}"
+    write_json(DEFAULT_OUTPUT, config)
+    write_json(SERVERS_FILE, {**servers, "current": index})
+    return None
+
+
+def restart_if_running():
+    """(успех, перезапущен ли контейнер): новый конфиг Xray читает только при старте."""
+    if not container_state()["running"]:
+        return True, False
+    ok, _, err = run("docker", "compose", "up", "-d", "--force-recreate")
+    return (True, True) if ok else (False, err)
+
+
+def select_server(index):
     with ACTION_LOCK:
-        write_json(DEFAULT_OUTPUT, build_config({"outbounds": chains[index]}, **listen_settings(load_env(ENV_FILE))))
-        write_json(SERVERS_FILE, {**servers, "current": index})
+        error = write_server_config(index, config_settings(load_env(ENV_FILE)))
+        if error:
+            return False, error
+        name = load_servers()["servers"][index]["name"]
         # Иначе «Обновить подписку» и ./gen_config.py вернули бы прежний сервер.
         set_env_value(ENV_FILE, "SERVER", name)
-        if not container_state()["running"]:
-            return True, f"Выбран сервер {name}. VPN выключен — включите его на главной вкладке."
-        ok, _, err = run("docker", "compose", "up", "-d", "--force-recreate")
-    return (True, f"VPN переключён на {name}.") if ok else (False, err)
+        ok, restarted = restart_if_running()
+    if not ok:
+        return False, restarted
+    return True, f"VPN переключён на {name}." if restarted else \
+        f"Выбран сервер {name}. VPN выключен — включите его на главной вкладке."
+
+
+def rules_info():
+    return config_settings(load_env(ENV_FILE))["routing"]
+
+
+def save_rules(body):
+    if not isinstance(body, dict) or body.get("mode") not in ("all", "filter"):
+        return False, "Неверный режим"
+    lists = {}
+    for key in ("apps", "hosts"):
+        items = body.get(key)
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            return False, "Неверный список"
+        lists[key] = list(dict.fromkeys(item.strip() for item in items if item.strip()))
+        # В .env список хранится через запятую в кавычках.
+        bad = next((item for item in lists[key] if any(c in item for c in ",'\"") or any(c.isspace() for c in item)), None)
+        if bad:
+            return False, f"Недопустимые символы в записи «{bad}»: запятые, кавычки и пробелы нельзя"
+    if body["mode"] == "filter" and not lists["apps"] and not lists["hosts"]:
+        return False, "Списки пусты — в режиме «по списку» через VPN не пойдёт ничего"
+    settings = config_settings(load_env(ENV_FILE))
+    settings["routing"] = {"mode": body["mode"], **lists}
+    with ACTION_LOCK:
+        error = write_server_config((load_servers() or {}).get("current"), settings)
+        if error:
+            return False, error
+        set_env_value(ENV_FILE, "ROUTING_MODE", body["mode"])
+        set_env_value(ENV_FILE, "VPN_APPS", ", ".join(lists["apps"]))
+        set_env_value(ENV_FILE, "VPN_HOSTS", ", ".join(lists["hosts"]))
+        ok, restarted = restart_if_running()
+    if not ok:
+        return False, restarted
+    mode = "всё через VPN" if body["mode"] == "all" else \
+        f"по списку: приложений {len(lists['apps'])}, хостов {len(lists['hosts'])}"
+    return True, f"Сохранено, режим — {mode}." + (" Контейнер перезапущен." if restarted else "")
 
 
 def comparable_config():
@@ -502,6 +578,7 @@ def status():
         "watcher": watcher == "active",
         "traffic": TRAFFIC.summary(),
         "server": servers["servers"][servers["current"]] if servers else None,
+        "routing": rules_info(),
         "servers_updated": servers["updated"] if servers else None,
     }
 
@@ -569,6 +646,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, status())
         if url.path == "/api/ip":
             return self.respond(200, check_ip())
+        if url.path == "/api/rules":
+            return self.respond(200, rules_info())
         if url.path == "/api/servers":
             return self.respond(200, servers_info())
         if url.path == "/api/hosts":  # отладочная вкладка «Хосты»
@@ -594,6 +673,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/update": update_subscription,
             "/api/check": check_servers,
             "/api/select": lambda: select_server(body.get("index") if isinstance(body, dict) else None),
+            "/api/rules": lambda: save_rules(body),
         }.get(self.path)
         if action is None:
             return self.respond(404, {"error": "not found"})
@@ -623,6 +703,8 @@ PAGE = """<!doctype html>
   .badge { font-size: .7rem; font-weight: 400; padding: 0 .35rem; border: 1px solid currentColor;
            border-radius: .3rem; vertical-align: middle; }
   .debug { background: #8c959f22; }
+  textarea { width: 100%; box-sizing: border-box; font: .9rem/1.4 ui-monospace, monospace; padding: .4rem; }
+  label.mode { display: block; margin: .3rem 0; }
   .state { display: flex; align-items: center; gap: .6rem; font-size: 1.6rem; font-weight: 600; }
   .dot { width: .9rem; height: .9rem; border-radius: 50%; background: var(--off); flex: none; }
   .on .dot { background: var(--on); }
@@ -653,7 +735,7 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <h1>lan-vpn-proxy</h1>
-<nav><a href="#" id="nav-main">Главная</a><a href="#servers" id="nav-servers">Серверы</a><a href="#hosts" id="nav-hosts">Хосты <span class="badge">отладка</span></a></nav>
+<nav><a href="#" id="nav-main">Главная</a><a href="#servers" id="nav-servers">Серверы</a><a href="#rules" id="nav-rules">Правила</a><a href="#hosts" id="nav-hosts">Хосты <span class="badge">отладка</span></a></nav>
 <section id="tab-main">
 <div id="state" class="state"><span class="dot"></span><span id="state-text">Загрузка…</span></div>
 <button id="toggle" disabled>…</button>
@@ -661,6 +743,7 @@ PAGE = """<!doctype html>
 <p id="hint" class="note" hidden></p>
 <dl>
   <dt>Сервер</dt><dd><span id="server">—</span> <a href="#servers">сменить</a></dd>
+  <dt>Через VPN</dt><dd><span id="routing">—</span> <a href="#rules">изменить</a></dd>
   <dt>Контейнер</dt><dd id="container">—</dd>
   <dt>Прокси GNOME</dt><dd id="proxy">—</dd>
   <dt>Внешний IP</dt><dd><span id="ip"></span> <button id="check">Проверить</button></dd>
@@ -683,6 +766,25 @@ PAGE = """<!doctype html>
 <p class="foot"><span id="servers-updated"></span> «Выбрать» переключает VPN на сервер и записывает его
 в <code>SERVER</code> в .env; если VPN включён, связь пропадёт на пару секунд. Проверка делает настоящий
 запрос через каждый сервер, задержка — время до ответа; сверху самые быстрые. № — номер в подписке.</p>
+</section>
+<section id="tab-rules" hidden>
+<label class="mode"><input type="radio" name="mode" value="all"> <b>Всё через VPN</b> — всё, что приходит в прокси</label>
+<label class="mode"><input type="radio" name="mode" value="filter"> <b>По списку</b> — через VPN только
+приложения и хосты ниже, остальное напрямую</label>
+<h2>Приложения</h2>
+<textarea id="rules-apps" rows="4" spellcheck="false"></textarea>
+<p class="foot">По одному в строке: имя исполняемого файла (как на вкладке «Хосты»), полный путь
+или папка с / на конце. Через VPN пойдут все подключения этого приложения.</p>
+<h2>Хосты</h2>
+<textarea id="rules-hosts" rows="14" spellcheck="false"></textarea>
+<p class="foot">По одному в строке: домен (youtube.com — вместе с поддоменами), IP или сеть
+(91.108.4.0/22). Можно и правила Xray: full:, keyword:, regexp:.</p>
+<p><button id="rules-save">Сохранить и применить</button></p>
+<p id="rules-msg" class="note" hidden></p>
+<p class="foot">Хранится в .env (ROUTING_MODE, VPN_APPS, VPN_HOSTS); списки действуют только в режиме
+«по списку». Перед применением Xray проверяет конфиг; если VPN включён, контейнер перезапускается —
+открытые соединения оборвутся, и программы переподключатся. Локальные сети всегда идут напрямую,
+а программы, которые не используют системный прокси (терминал, Claude Code), — напрямую в любом режиме.</p>
 </section>
 <section id="tab-hosts" hidden>
 <p class="note debug">Отладочная функция: помогает понять, что идёт через VPN. Цифры приблизительные —
@@ -826,6 +928,9 @@ function render(s) {
   $('toggle').disabled = busy;
   $('container').textContent = s.status;
   $('server').textContent = s.server ? s.server.name + ' · ' + kind(s.server) : 'не выбран';
+  $('routing').textContent = s.routing.mode === 'filter'
+    ? 'по списку: приложений ' + s.routing.apps.length + ', хостов ' + s.routing.hosts.length + ', остальное напрямую'
+    : 'всё, что идёт через прокси';
   // Список перечитываем, только когда gen_config.py собрал новый конфиг.
   const key = s.servers_updated + '|' + (s.server && s.server.name);
   if (key !== serversKey) { serversKey = key; loadServers(); }
@@ -921,10 +1026,36 @@ $('hosts-app').onchange = loadHosts;
 setInterval(() => { if (!$('tab-hosts').hidden) loadHosts(); }, 30000);
 
 // Вкладка хранится в адресе (#servers, #hosts), поэтому переживает перезагрузку страницы.
-const TABS = {'#servers': 'servers', '#hosts': 'hosts'};
+async function loadRules() {
+  const r = await (await fetch('/api/rules')).json();
+  for (const input of document.querySelectorAll('input[name=mode]')) input.checked = input.value === r.mode;
+  $('rules-apps').value = r.apps.join('\\n');
+  $('rules-hosts').value = r.hosts.join('\\n');
+}
+
+$('rules-save').onclick = async () => {
+  const lines = id => $(id).value.split('\\n').map(s => s.trim()).filter(Boolean);
+  const mode = (document.querySelector('input[name=mode]:checked') || {}).value;
+  $('rules-save').disabled = true;
+  $('rules-save').textContent = 'Применяю…';
+  try {
+    const r = await post('rules', {mode, apps: lines('rules-apps'), hosts: lines('rules-hosts')});
+    $('rules-msg').className = 'note ' + (r.ok ? 'ok' : 'err');
+    note('rules-msg', r.message || (r.ok ? '' : 'Не получилось'));
+    if (r.ok) await loadRules();
+  } catch (e) {
+    $('rules-msg').className = 'note err';
+    note('rules-msg', 'Нет связи с веб-интерфейсом: ' + e);
+  }
+  $('rules-save').disabled = false;
+  $('rules-save').textContent = 'Сохранить и применить';
+};
+
+const TABS = {'#servers': 'servers', '#rules': 'rules', '#hosts': 'hosts'};
 function showTab() {
   const tab = TABS[location.hash] || 'main';
-  for (const name of ['main', 'servers', 'hosts']) {
+  if (tab === 'rules') loadRules();
+  for (const name of ['main', 'servers', 'rules', 'hosts']) {
     $('tab-' + name).hidden = name !== tab;
     if (name === tab) $('nav-' + name).setAttribute('aria-current', 'page');
     else $('nav-' + name).removeAttribute('aria-current');
