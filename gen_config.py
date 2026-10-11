@@ -27,6 +27,8 @@ PRIVATE_NETS = [
 # Порты внутри контейнера; наружу пробрасываются в docker-compose.yml.
 SOCKS_PORT = 1080
 HTTP_PORT = 3128
+# API статистики слушает только внутри контейнера, web.py читает его через docker exec.
+STATS_API = "127.0.0.1:10085"
 
 
 def load_env(path):
@@ -254,6 +256,11 @@ def build_config(server):
     sniffing = {"enabled": True, "destOverride": ["http", "tls"]}
     return {
         "log": {"loglevel": "warning"},
+        # Счётчики байт по inbound: всё, что пришло в прокси. Счётчики outbound не годятся:
+        # с XTLS Vision данные после рукопожатия идут в обход них.
+        "stats": {},
+        "api": {"tag": "api", "listen": STATS_API, "services": ["StatsService"]},
+        "policy": {"system": {"statsInboundUplink": True, "statsInboundDownlink": True}},
         "inbounds": [
             {"tag": "socks", "listen": "0.0.0.0", "port": SOCKS_PORT, "protocol": "socks",
              "settings": {"auth": "noauth", "udp": False}, "sniffing": sniffing},
