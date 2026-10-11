@@ -1,0 +1,10 @@
+[Unit]
+Description=Веб-интерфейс lan-vpn-proxy (порт — WEB_PORT в .env, по умолчанию 8765)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/projects/lan_vpn_proxy/web.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

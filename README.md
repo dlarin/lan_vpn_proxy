@@ -12,6 +12,7 @@ VPN-прокси на Xray в Docker вместо клиента Happ.
 - `gen_config.py` — собирает `xray/config.json` из подписки, указанной в `.env`. Через VPN идёт всё, кроме локальных сетей.
 - `proxy-watch.sh` — следит за контейнером через `docker events` и переключает системный прокси GNOME: контейнер запущен — режим «вручную» на `127.0.0.1:3128`, остановлен, упал или Docker недоступен — режим «отключено».
 - `lan-vpn-proxy-watch.service` — пользовательская служба systemd, которая держит `proxy-watch.sh` запущенным. Если служба остановлена, прокси тоже выключается.
+- `web.py` и `lan-vpn-proxy-web.service` — веб-интерфейс с кнопкой «Включить/Выключить» на `http://127.0.0.1:8765`.
 
 Через VPN идут только программы, которые используют системный прокси: Chrome, Firefox (с настройкой «Использовать системные настройки прокси»), большинство GUI-приложений. Терминал, Docker-контейнеры и остальное ходят напрямую.
 
@@ -78,6 +79,22 @@ docker compose up -d --force-recreate
 
 Для разовой проверки `.env` можно не трогать: аргументы важнее значений из него, например `./gen_config.py 'vless://…' -s 2`.
 
+## Веб-интерфейс
+
+Страница с кнопкой «Включить/Выключить», состоянием контейнера и системного прокси и проверкой внешнего IP (через VPN и напрямую). Кнопка делает то же, что `docker compose up -d` и `docker compose stop`; прокси GNOME вслед за контейнером переключает служба из шага 4 установки. Написан на стандартной библиотеке Python, ничего ставить не нужно.
+
+Включить и открыть:
+
+```bash
+systemctl --user link ~/projects/lan_vpn_proxy/lan-vpn-proxy-web.service
+systemctl --user enable --now lan-vpn-proxy-web.service
+xdg-open http://127.0.0.1:8765
+```
+
+Разово, без службы: `./web.py`.
+
+Интерфейс управляет Docker, поэтому слушает только `127.0.0.1` и отвечает лишь на адреса `127.0.0.1:WEB_PORT` и `localhost:WEB_PORT`. Действия принимаются только как JSON-запросы со своей страницы — сторонний сайт, открытый в браузере, нажать кнопку за вас не сможет.
+
 ## Настройки
 
 Все настройки — в `.env`. Значения со спецсимволами (`&`, `#`, `$`) берите в одинарные кавычки. Переменная окружения с тем же именем важнее значения из `.env`, как в docker compose.
@@ -90,12 +107,14 @@ docker compose up -d --force-recreate
 | `BIND_ADDR`               | `127.0.0.1`     | `0.0.0.0` откроет прокси для устройств в локальной сети        |
 | `SOCKS_PORT`              | `1080`          | порт SOCKS5 на ноутбуке                                        |
 | `HTTP_PORT`               | `3128`          | порт HTTP; его же `proxy-watch.sh` прописывает в прокси GNOME  |
+| `WEB_PORT`                | `8765`          | порт веб-интерфейса                                            |
 | `PUID`/`PGID`             | `1000`          | от чьего имени работает Xray (должен читать конфиг)            |
 
 Что делать после изменения:
 
 - `SUBSCRIPTION`, `SERVER`, `SUBSCRIPTION_USER_AGENT` — `./gen_config.py && docker compose up -d --force-recreate`;
-- `BIND_ADDR`, порты, `PUID`/`PGID` — `docker compose up -d`, а для `HTTP_PORT` ещё и `systemctl --user restart lan-vpn-proxy-watch.service`.
+- `BIND_ADDR`, порты, `PUID`/`PGID` — `docker compose up -d`, а для `HTTP_PORT` ещё и `systemctl --user restart lan-vpn-proxy-watch.service lan-vpn-proxy-web.service`;
+- `WEB_PORT` — `systemctl --user restart lan-vpn-proxy-web.service`.
 
 С `BIND_ADDR=0.0.0.0` прокси работает **без пароля**: им сможет пользоваться любой в той же Wi-Fi. В отелях и других чужих сетях не включайте.
 
@@ -114,6 +133,7 @@ gsettings get org.gnome.system.proxy mode               # manual — через 
 ## Удаление
 
 ```bash
+systemctl --user disable --now lan-vpn-proxy-web.service
 systemctl --user disable --now lan-vpn-proxy-watch.service   # прокси выключится сам
 docker compose down
 ```

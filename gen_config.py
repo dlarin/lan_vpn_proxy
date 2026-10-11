@@ -49,6 +49,11 @@ def load_env(path):
     return values
 
 
+def setting(dotenv, key, default=None):
+    # Как в docker compose: переменная окружения важнее значения из .env.
+    return os.environ.get(key) or dotenv.get(key) or default
+
+
 def b64decode(text):
     text = "".join(text.split()).replace("-", "+").replace("_", "/")
     text += "=" * (-len(text) % 4)
@@ -284,19 +289,14 @@ def write_config(path, config):
 
 def main():
     dotenv = load_env(ENV_FILE)
-
-    def setting(key, default=None):
-        # Как в docker compose: переменная окружения важнее значения из .env.
-        return os.environ.get(key) or dotenv.get(key) or default
-
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("source", nargs="?", default=setting("SUBSCRIPTION"),
+    parser.add_argument("source", nargs="?", default=setting(dotenv, "SUBSCRIPTION"),
                         help="URL подписки, ссылка, файл или - (по умолчанию SUBSCRIPTION из .env)")
     parser.add_argument("-l", "--list", action="store_true", help="показать серверы и выйти")
-    parser.add_argument("-s", "--server", default=setting("SERVER"),
+    parser.add_argument("-s", "--server", default=setting(dotenv, "SERVER"),
                         help="номер из --list или часть названия (по умолчанию SERVER из .env, иначе первый)")
     parser.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="куда записать конфиг")
-    parser.add_argument("--user-agent", default=setting("SUBSCRIPTION_USER_AGENT", DEFAULT_USER_AGENT),
+    parser.add_argument("--user-agent", default=setting(dotenv, "SUBSCRIPTION_USER_AGENT", DEFAULT_USER_AGENT),
                         help="User-Agent для загрузки подписки (по умолчанию SUBSCRIPTION_USER_AGENT из .env)")
     args = parser.parse_args()
     if not args.source:

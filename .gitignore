@@ -4,3 +4,4 @@ xray/*
 !xray/.gitkeep
 
 .idea/
+__pycache__/
