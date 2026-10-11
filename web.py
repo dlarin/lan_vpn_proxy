@@ -60,6 +60,13 @@ CISCO_REFRESH = 10  # секунд между запросами состоян�
 CISCO_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
 CISCO_GUI_HINT = ("Открыто окно Cisco Secure Client, а пока оно работает, Cisco не даёт подключаться "
                   "из других программ. Закройте его и нажмите ещё раз.")
+# Значок вкладки — щит с туннелем. Цвет — как у точки состояния на странице, чтобы его было видно
+# и по фоновой вкладке.
+ICON = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+        '<path d="M32 3 L57 11 V30 C57 46 46 56.5 32 61 C18 56.5 7 46 7 30 V11 Z" fill="{color}"/>'
+        '<path d="M20 47 V33 A12 12 0 0 1 44 33 V47" fill="none" stroke="#fff" stroke-width="7" '
+        'stroke-linecap="round"/></svg>')
+ICON_COLORS = {"on": "#52c41a", "off": "#8c8c8c", "warn": "#faad14"}  # цвета Ant Design, как на странице
 
 dotenv = load_env(ENV_FILE)
 WEB_PORT = int(setting(dotenv, "WEB_PORT", "8765"))
@@ -855,6 +862,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path == "/":
             return self.respond(200, PAGE.encode(), "text/html; charset=utf-8")
+        if url.path == "/favicon.svg":
+            state = (urllib.parse.parse_qs(url.query).get("s") or ["off"])[0]
+            return self.respond(200, ICON.format(color=ICON_COLORS.get(state, ICON_COLORS["off"])).encode(),
+                                "image/svg+xml")
         if url.path == "/api/status":
             return self.respond(200, status())
         if url.path == "/api/ip":
@@ -907,58 +918,157 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VPN-прокси</title>
+<link rel="icon" id="favicon" href="/favicon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: light dark; --on: #1a7f37; --off: #8c959f; --warn: #bf8700; }
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
-  h1 { font-size: 1rem; font-weight: 500; opacity: .7; margin: 0 0 1rem; }
-  nav { display: flex; gap: 1.2rem; border-bottom: 1px solid #8884; margin: 0 0 1.5rem; }
-  nav a { padding: .4rem 0; margin-bottom: -1px; color: inherit; text-decoration: none; opacity: .7;
-          border-bottom: 2px solid transparent; }
-  nav a[aria-current] { opacity: 1; font-weight: 600; border-bottom-color: currentColor; }
-  td button { padding: .2rem .6rem; font-size: .9rem; }
-  .badge { font-size: .7rem; font-weight: 400; padding: 0 .35rem; border: 1px solid currentColor;
-           border-radius: .3rem; vertical-align: middle; }
-  .debug { background: #8c959f22; }
-  textarea { width: 100%; box-sizing: border-box; font: .9rem/1.4 ui-monospace, monospace; padding: .4rem; }
-  label.mode { display: block; margin: .3rem 0; }
-  .state { display: flex; align-items: center; gap: .6rem; font-size: 1.6rem; font-weight: 600; }
-  .dot { width: .9rem; height: .9rem; border-radius: 50%; background: var(--off); flex: none; }
-  .on .dot { background: var(--on); }
-  .warn .dot { background: var(--warn); }
-  button { font: inherit; padding: .4rem .9rem; border-radius: .5rem; border: 1px solid #8888; cursor: pointer; }
-  button:disabled { cursor: progress; opacity: .6; }
-  #toggle { width: 100%; margin: 1.2rem 0; padding: .8rem; font-size: 1.1rem; font-weight: 600; }
-  .note { padding: .6rem .8rem; border-radius: .4rem; margin: 0 0 1rem; }
-  #error { background: #cf222e22; }
-  #hint, #cisco-hint { background: #bf870022; }
-  .login { display: grid; grid-template-columns: 1fr 1fr 6rem auto; gap: .5rem; margin: 1rem 0; }
-  .login input { font: inherit; min-width: 0; padding: .4rem .6rem; border-radius: .5rem; border: 1px solid #8888; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: .4rem 1rem; margin: 0; }
-  dt { opacity: .7; }
-  dd { margin: 0; }
-  h2 { font-size: 1.1rem; margin: 2rem 0 .5rem; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .3rem .8rem .3rem 0; border-bottom: 1px solid #8884; }
-  th { font-weight: 500; opacity: .7; }
-  td { font-variant-numeric: tabular-nums; }
-  .foot { font-size: .85rem; opacity: .7; }
-  .addr { display: block; font-size: .8rem; opacity: .6; }
-  tr.current td { font-weight: 600; }
-  tr.muted td { opacity: .7; }
-  .ok { background: #1a7f3722; }
-  .err { background: #cf222e22; }
-  code { font-size: .9em; }
+  /* Оформление по Ant Design 5: его цвета, размеры и компоненты на чистом CSS, без библиотеки и CDN. */
+  :root {
+    color-scheme: light dark;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+    --primary: #1677ff; --primary-hover: #4096ff; --primary-active: #0958d9; --primary-bg: #e6f4ff;
+    --primary-shadow: rgba(5, 145, 255, .1);
+    --success: #52c41a; --warning: #faad14; --error: #ff4d4f; --error-hover: #ff7875; --off: #bfbfbf;
+    --text: rgba(0, 0, 0, .88); --text-3: rgba(0, 0, 0, .45); --text-disabled: rgba(0, 0, 0, .25);
+    --border: #d9d9d9; --border-2: #f0f0f0; --bg-layout: #f5f5f5; --bg-container: #fff;
+    --fill-disabled: rgba(0, 0, 0, .04); --table-head: #fafafa; --row-hover: #fafafa;
+    --success-bg: #f6ffed; --success-border: #b7eb8f; --success-text: #389e0d;
+    --warning-bg: #fffbe6; --warning-border: #ffe58f;
+    --error-bg: #fff2f0; --error-border: #ffccc7;
+    --info-bg: #e6f4ff; --info-border: #91caff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --primary: #1668dc; --primary-hover: #3c89e8; --primary-active: #1554ad; --primary-bg: #111a2c;
+      --primary-shadow: rgba(0, 60, 180, .15);
+      --success: #49aa19; --warning: #d89614; --error: #dc4446; --error-hover: #e86e6b; --off: #595959;
+      --text: rgba(255, 255, 255, .85); --text-3: rgba(255, 255, 255, .45); --text-disabled: rgba(255, 255, 255, .25);
+      --border: #424242; --border-2: #303030; --bg-layout: #000; --bg-container: #141414;
+      --fill-disabled: rgba(255, 255, 255, .08); --table-head: #1d1d1d; --row-hover: #262626;
+      --success-bg: #162312; --success-border: #274916; --success-text: #49aa19;
+      --warning-bg: #2b2111; --warning-border: #594214;
+      --error-bg: #2c1618; --error-border: #5b2526;
+      --info-bg: #111a2c; --info-border: #15325b;
+    }
+  }
+  body { margin: 0; background: var(--bg-layout); color: var(--text); font: 14px/1.5714 var(--font); }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px; }
+  header { display: flex; align-items: center; gap: 12px; margin: 0 0 8px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  a { color: var(--primary); text-decoration: none; transition: color .2s; }
+  a:hover { color: var(--primary-hover); }
+  code { margin: 0 .2em; padding: .2em .4em .1em; font: 85% var(--mono); background: rgba(150, 150, 150, .1);
+         border: 1px solid rgba(100, 100, 100, .2); border-radius: 3px; }
   [hidden] { display: none !important; }
+
+  /* Tabs */
+  nav { display: flex; gap: 32px; margin: 0 0 16px; border-bottom: 1px solid var(--border-2); }
+  nav a { padding: 12px 0; margin-bottom: -1px; color: var(--text); border-bottom: 2px solid transparent; }
+  nav a:hover { color: var(--primary-hover); }
+  nav a[aria-current] { color: var(--primary); border-bottom-color: var(--primary); }
+
+  /* Card */
+  .card { margin: 0 0 16px; padding: 20px 24px; background: var(--bg-container); border: 1px solid var(--border-2);
+          border-radius: 8px; }
+  .card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+               min-height: 56px; margin: -20px -24px 20px; padding: 8px 24px; box-sizing: border-box;
+               border-bottom: 1px solid var(--border-2); }
+  .card-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .extra { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .extra .foot { margin: 0; }
+  h3 { margin: 24px 0 8px; font-size: 14px; font-weight: 600; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 16px; }
+  .toolbar .end { margin-left: auto; }
+
+  /* Button */
+  button { height: 32px; padding: 4px 15px; font: inherit; color: var(--text); background: var(--bg-container);
+           border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 2px 0 rgba(0, 0, 0, .02);
+           cursor: pointer; transition: all .2s cubic-bezier(.645, .045, .355, 1); }
+  button:hover { color: var(--primary-hover); border-color: var(--primary-hover); }
+  button:active { color: var(--primary-active); border-color: var(--primary-active); }
+  button.primary { color: #fff; background: var(--primary); border-color: var(--primary);
+                   box-shadow: 0 2px 0 var(--primary-shadow); }
+  button.primary:hover { color: #fff; background: var(--primary-hover); border-color: var(--primary-hover); }
+  button.primary:active { background: var(--primary-active); border-color: var(--primary-active); }
+  button.danger { color: var(--error); border-color: var(--error); }
+  button.danger:hover { color: var(--error-hover); border-color: var(--error-hover); }
+  button.large { height: 40px; padding: 6px 15px; font-size: 16px; border-radius: 8px; }
+  button:disabled, button:disabled:hover { color: var(--text-disabled); background: var(--fill-disabled);
+                                           border-color: var(--border); box-shadow: none; cursor: progress; }
+  td button { height: 24px; padding: 0 7px; border-radius: 4px; }
+  #toggle { display: block; width: 100%; margin: 16px 0; }
+
+  /* Input, Select, Radio, Checkbox */
+  input:not([type=radio]):not([type=checkbox]), textarea, select {
+    box-sizing: border-box; padding: 4px 11px; font: inherit; color: var(--text); background: var(--bg-container);
+    border: 1px solid var(--border); border-radius: 6px; transition: border-color .2s, box-shadow .2s; }
+  input:not([type=radio]):not([type=checkbox]), select { height: 32px; }
+  input:hover, textarea:hover, select:hover { border-color: var(--primary-hover); }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--primary);
+                                              box-shadow: 0 0 0 2px var(--primary-shadow); }
+  input::placeholder { color: var(--text-disabled); }
+  textarea { display: block; width: 100%; font: 13px/1.5714 var(--mono); resize: vertical; }
+  select { appearance: none; padding-right: 30px; cursor: pointer;
+           background: var(--bg-container) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%238c8c8c' stroke-width='1.4'/%3E%3C/svg%3E") right 10px center / 12px no-repeat; }
+  input[type=radio], input[type=checkbox] { appearance: none; flex: none; width: 16px; height: 16px; margin: 0 8px 0 0;
+    vertical-align: -3px; background: var(--bg-container); border: 1px solid var(--border); cursor: pointer;
+    transition: all .2s; }
+  input[type=radio] { border-radius: 50%; }
+  input[type=checkbox] { border-radius: 4px; }
+  input[type=radio]:hover, input[type=checkbox]:hover { border-color: var(--primary); }
+  input[type=radio]:checked { border-color: var(--primary); background: radial-gradient(circle, #fff 0 3px, var(--primary) 3.5px); }
+  input[type=checkbox]:checked { border-color: var(--primary);
+    background: var(--primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.5 9.5 3.5' fill='none' stroke='white' stroke-width='1.8'/%3E%3C/svg%3E") center / 12px no-repeat; }
+  label { cursor: pointer; }
+  label.mode { display: flex; align-items: baseline; margin: 0 0 8px; }
+  label.mode input { position: relative; top: 3px; }
+  .login { display: grid; grid-template-columns: 1fr 1fr 7rem auto; gap: 8px; margin: 16px 0; }
+  .login input { min-width: 0; }
+
+  /* Alert, Tag, Badge */
+  .note { margin: 0 0 16px; padding: 8px 12px; background: var(--info-bg); border: 1px solid var(--info-border);
+          border-radius: 8px; }
+  .note.ok { background: var(--success-bg); border-color: var(--success-border); }
+  .note.err { background: var(--error-bg); border-color: var(--error-border); }
+  .note.warn { background: var(--warning-bg); border-color: var(--warning-border); }
+  .tag { display: inline-block; padding: 0 7px; font-size: 12px; line-height: 20px; font-weight: 400; white-space: nowrap;
+         color: var(--text); background: var(--table-head); border: 1px solid var(--border); border-radius: 4px; }
+  .tag.blue { color: var(--primary); background: var(--info-bg); border-color: var(--info-border); }
+  .tag.green { color: var(--success-text); background: var(--success-bg); border-color: var(--success-border); }
+  nav .tag { margin-left: 4px; vertical-align: 1px; }
+  .state { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 600; line-height: 1.4; }
+  .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--off); }
+  .on .dot { background: var(--success); }
+  .warn .dot { background: var(--warning); }
+
+  /* Descriptions */
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 24px; margin: 0; }
+  dt { color: var(--text-3); }
+  dd { margin: 0; }
+
+  /* Table */
+  table { width: 100%; border-collapse: separate; border-spacing: 0; }
+  th, td { padding: 12px 8px; text-align: left; border-bottom: 1px solid var(--border-2); }
+  th { font-weight: 600; background: var(--table-head); }
+  th:first-child { border-top-left-radius: 8px; }
+  th:last-child { border-top-right-radius: 8px; }
+  td { font-variant-numeric: tabular-nums; transition: background .2s; }
+  tbody tr:hover td { background: var(--row-hover); }
+  tr.current td, tr.current:hover td { background: var(--primary-bg); }
+  tr.muted td { color: var(--text-3); }
+  .addr { display: block; font-size: 12px; color: var(--text-3); }
+  .foot { margin: 12px 0 0; color: var(--text-3); }
 </style>
 </head>
 <body>
-<h1>lan-vpn-proxy</h1>
-<nav><a href="#" id="nav-main">Главная</a><a href="#servers" id="nav-servers">Серверы</a><a href="#rules" id="nav-rules">Правила</a><a href="#hosts" id="nav-hosts">Хосты <span class="badge">отладка</span></a></nav>
+<main>
+<header><img id="logo" src="/favicon.svg" alt="" width="32" height="32"><h1>lan-vpn-proxy</h1></header>
+<nav><a href="#" id="nav-main">Главная</a><a href="#servers" id="nav-servers">Серверы</a><a href="#rules" id="nav-rules">Правила</a><a href="#hosts" id="nav-hosts">Хосты<span class="tag">отладка</span></a></nav>
 <section id="tab-main">
+<div class="card">
 <div id="state" class="state"><span class="dot"></span><span id="state-text">Загрузка…</span></div>
-<button id="toggle" disabled>…</button>
-<p id="error" class="note" hidden></p>
-<p id="hint" class="note" hidden></p>
+<button id="toggle" class="large primary" disabled>…</button>
+<p id="error" class="note err" hidden></p>
+<p id="hint" class="note warn" hidden></p>
 <dl>
   <dt>Сервер</dt><dd><span id="server">—</span> <a href="#servers">сменить</a></dd>
   <dt>Через VPN</dt><dd><span id="routing">—</span> <a href="#rules">изменить</a></dd>
@@ -966,35 +1076,39 @@ PAGE = """<!doctype html>
   <dt>Прокси GNOME</dt><dd id="proxy">—</dd>
   <dt>Внешний IP</dt><dd><span id="ip"></span> <button id="check">Проверить</button></dd>
 </dl>
-<div id="cisco" hidden>
-<h2>Рабочий VPN (Cisco)</h2>
+</div>
+<div id="cisco" class="card" hidden>
+<div class="card-head"><h2>Рабочий VPN (Cisco)</h2><span id="cisco-state" class="tag">—</span></div>
 <dl>
-  <dt>Состояние</dt><dd id="cisco-state">—</dd>
   <dt>Сервер</dt><dd id="cisco-host">—</dd>
 </dl>
 <form id="cisco-form" class="login" hidden>
   <input id="cisco-user" name="username" autocomplete="username" placeholder="Логин" required>
   <input id="cisco-password" name="password" type="password" autocomplete="current-password" placeholder="Пароль" required>
   <input id="cisco-otp" name="otp" autocomplete="one-time-code" inputmode="numeric" placeholder="Код">
-  <button id="cisco-connect">Подключить</button>
+  <button id="cisco-connect" class="primary">Подключить</button>
 </form>
-<p id="cisco-actions" hidden><button id="cisco-disconnect">Отключить</button></p>
-<p id="cisco-hint" class="note" hidden></p>
+<p id="cisco-actions" hidden><button id="cisco-disconnect" class="danger">Отключить</button></p>
+<p id="cisco-hint" class="note warn" hidden></p>
 <p id="cisco-msg" class="note" hidden></p>
 <p class="foot">Через Cisco идут только рабочие сети — их задаёт сервер Cisco, остальное он не трогает.
 Рабочие сайты из списка «Всегда напрямую» (вкладка «Правила») идут мимо VPN-прокси и попадают в Cisco
 в любом режиме. Пароль и код никуда не сохраняются.</p>
 </div>
-<h2>Трафик по дням</h2>
+<div class="card">
+<div class="card-head"><h2>Трафик по дням</h2></div>
 <table>
   <thead><tr><th>День</th><th>Через VPN</th><th>Напрямую</th></tr></thead>
   <tbody id="traffic"></tbody>
 </table>
 <p class="foot">↓ получено, ↑ отправлено. «Напрямую» — приблизительно: сюда же попадают
 локальная сеть и накладные расходы шифрования VPN. Замер раз в минуту.</p>
+</div>
 </section>
 <section id="tab-servers" hidden>
-<p><button id="update">Обновить подписку</button> <button id="test">Проверить серверы</button></p>
+<div class="card">
+<div class="card-head"><h2>Серверы</h2>
+  <span class="extra"><button id="update">Обновить подписку</button> <button id="test" class="primary">Проверить серверы</button></span></div>
 <p id="servers-msg" class="note" hidden></p>
 <table>
   <thead><tr><th>№</th><th>Сервер</th><th>Подключение</th><th>Задержка</th><th></th></tr></thead>
@@ -1003,25 +1117,29 @@ PAGE = """<!doctype html>
 <p class="foot"><span id="servers-updated"></span> «Выбрать» переключает VPN на сервер и записывает его
 в <code>SERVER</code> в .env; если VPN включён, связь пропадёт на пару секунд. Проверка делает настоящий
 запрос через каждый сервер, задержка — время до ответа; сверху самые быстрые. № — номер в подписке.</p>
+</div>
 </section>
 <section id="tab-rules" hidden>
-<label class="mode"><input type="radio" name="mode" value="all"> <b>Всё через VPN</b> — всё, что приходит в прокси</label>
-<label class="mode"><input type="radio" name="mode" value="filter"> <b>По списку</b> — через VPN только
-приложения и хосты ниже, остальное напрямую</label>
-<h2>Приложения</h2>
+<div class="card">
+<div class="card-head"><h2>Что идёт через VPN</h2></div>
+<label class="mode"><input type="radio" name="mode" value="all"><span><b>Всё через VPN</b> — всё, что приходит в прокси</span></label>
+<label class="mode"><input type="radio" name="mode" value="filter"><span><b>По списку</b> — через VPN только
+приложения и хосты ниже, остальное напрямую</span></label>
+<h3>Приложения</h3>
 <textarea id="rules-apps" rows="4" spellcheck="false"></textarea>
 <p class="foot">По одному в строке: имя исполняемого файла (как на вкладке «Хосты»), полный путь
 или папка с / на конце. Через VPN пойдут все подключения этого приложения.</p>
-<h2>Хосты</h2>
+<h3>Хосты</h3>
 <textarea id="rules-hosts" rows="14" spellcheck="false"></textarea>
 <p class="foot">По одному в строке: домен (youtube.com — вместе с поддоменами), IP или сеть
 (91.108.4.0/22). Можно и правила Xray: full:, keyword:, regexp:.</p>
-<h2>Всегда напрямую</h2>
+<h3>Всегда напрямую</h3>
 <textarea id="rules-direct" rows="3" spellcheck="false"></textarea>
 <p class="foot">Мимо VPN в любом режиме, даже для приложений из списка: например, рабочие сайты — они
 пойдут через Cisco, если он подключён. Формат тот же, что у хостов. Эти адреса попадают и в исключения
 системного прокси GNOME (кроме keyword: и regexp: — их GNOME не понимает).</p>
-<p><button id="rules-save">Сохранить и применить</button></p>
+</div>
+<p><button id="rules-save" class="primary">Сохранить и применить</button></p>
 <p id="rules-msg" class="note" hidden></p>
 <p class="foot">Хранится в .env (ROUTING_MODE, VPN_APPS, VPN_HOSTS, DIRECT_HOSTS); списки приложений
 и хостов действуют только в режиме «по списку». Перед применением Xray проверяет конфиг; если VPN включён, контейнер перезапускается —
@@ -1029,22 +1147,25 @@ PAGE = """<!doctype html>
 а программы, которые не используют системный прокси (терминал, Claude Code), — напрямую в любом режиме.</p>
 </section>
 <section id="tab-hosts" hidden>
-<p class="note debug">Отладочная функция: помогает понять, что идёт через VPN. Цифры приблизительные —
+<p class="note">Отладочная функция: помогает понять, что идёт через VPN. Цифры приблизительные —
 считаются подключения из журнала Xray, а не трафик.</p>
-<p>
+<div class="toolbar">
   <select id="hosts-days">
     <option value="1">Сегодня</option><option value="7">7 дней</option><option value="30">30 дней</option>
   </select>
-  <label><input type="checkbox" id="hosts-group" checked> по доменам</label>
-  <button id="hosts-reset">Сбросить статистику</button>
-</p>
-<h2>Приложения</h2>
+  <label><input type="checkbox" id="hosts-group" checked>по доменам</label>
+  <button id="hosts-reset" class="danger end">Сбросить статистику</button>
+</div>
+<div class="card">
+<div class="card-head"><h2>Приложения</h2></div>
 <table>
   <thead><tr><th>Приложение</th><th>Подключений</th><th>Доля</th></tr></thead>
   <tbody id="apps"></tbody>
 </table>
-<h2>Хосты</h2>
-<p><select id="hosts-app"><option value="">Все приложения</option></select> <span id="hosts-total"></span></p>
+</div>
+<div class="card">
+<div class="card-head"><h2>Хосты</h2>
+  <span class="extra"><span id="hosts-total" class="foot"></span><select id="hosts-app"><option value="">Все приложения</option></select></span></div>
 <table>
   <thead><tr><th>Хост</th><th>Приложения</th><th>Подключений</th><th>Доля</th></tr></thead>
   <tbody id="hosts"></tbody>
@@ -1054,7 +1175,9 @@ PAGE = """<!doctype html>
 определяется по открытым соединениям с прокси (опрос раз в 2 секунды), поэтому совсем короткие
 подключения и программы других пользователей попадают в «не определено». «По доменам»
 объединяет поддомены: mc.yandex.ru и yandex.ru → yandex.ru. Хранится 30 дней.</p>
+</div>
 </section>
+</main>
 <script>
 const $ = id => document.getElementById(id);
 let busy = false, last = null, servers = [], current = -1, check = {delays: {}}, serversKey = null;
@@ -1122,7 +1245,9 @@ function renderServers() {
     addr.textContent = s.address + ':' + s.port;
     name.append(addr);
     const delay = d === undefined ? '—' : d === null ? 'не работает' : d + ' мс';
-    let action = 'текущий';
+    let action = document.createElement('span');
+    action.className = 'tag blue';
+    action.textContent = 'текущий';
     if (i !== current) {
       action = document.createElement('button');
       action.textContent = 'Выбрать';
@@ -1167,7 +1292,10 @@ function render(s) {
   const active = s.running || s.restarting;
   $('state').className = 'state ' + (s.restarting ? 'warn' : s.running ? 'on' : '');
   $('state-text').textContent = s.restarting ? 'Контейнер перезапускается' : s.running ? 'VPN включён' : 'VPN выключен';
+  const icon = '/favicon.svg?s=' + (s.restarting ? 'warn' : s.running ? 'on' : 'off');
+  if ($('favicon').getAttribute('href') !== icon) $('favicon').href = $('logo').src = icon;
   $('toggle').textContent = active ? 'Выключить' : 'Включить';
+  $('toggle').className = 'large ' + (active ? 'danger' : 'primary');
   $('toggle').disabled = busy;
   $('container').textContent = s.status;
   $('server').textContent = s.server ? s.server.name + ' · ' + kind(s.server) : 'не выбран';
@@ -1200,6 +1328,7 @@ function renderCisco(c) {
   if (!c) return;
   const connected = c.state === 'Connected' || c.state === 'Reconnecting';
   $('cisco-state').textContent = c.busy ? 'подключается…' : c.state ? CISCO_STATES[c.state] || c.state : 'узнаю…';
+  $('cisco-state').className = 'tag' + (connected ? ' green' : c.busy || /ing$/.test(c.state) ? ' blue' : '');
   $('cisco-host').textContent = c.host || 'не задан — впишите CISCO_HOST в .env';
   $('cisco-form').hidden = connected;
   $('cisco-actions').hidden = !connected;
