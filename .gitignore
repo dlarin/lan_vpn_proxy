@@ -1,0 +1,6 @@
+# Ключи доступа к VPN
+.env
+xray/*
+!xray/.gitkeep
+
+.idea/

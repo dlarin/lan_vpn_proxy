@@ -1,0 +1,13 @@
+services:
+  xray:
+    image: ghcr.io/xtls/xray-core:26.7.28
+    container_name: lan-vpn-proxy
+    restart: unless-stopped
+    # Свой uid, чтобы xray мог читать config.json с правами 600.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      # BIND_ADDR=0.0.0.0 откроет прокси для локальной сети (без пароля!).
+      - "${BIND_ADDR:-127.0.0.1}:${SOCKS_PORT:-1080}:1080"
+      - "${BIND_ADDR:-127.0.0.1}:${HTTP_PORT:-3128}:3128"
+    volumes:
+      - ./xray:/usr/local/etc/xray:ro

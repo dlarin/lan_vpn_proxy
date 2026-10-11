@@ -1,0 +1,12 @@
+[Unit]
+Description=Системный прокси GNOME следует за контейнером lan-vpn-proxy
+
+[Service]
+ExecStart=%h/projects/lan_vpn_proxy/proxy-watch.sh
+# Если наблюдатель не работает, безопаснее ходить напрямую, чем в мёртвый прокси.
+ExecStopPost=/usr/bin/gsettings set org.gnome.system.proxy mode 'none'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
