@@ -13,6 +13,10 @@ services:
     pid: host
     security_opt:
       - apparmor=unconfined
+    # Прозрачный прокси (TPROXY_PORT) открывает сокет с IP_TRANSPARENT — нужен NET_ADMIN. Право
+    # действует, только если Xray работает от root (PUID=0); с обычным PUID оно ни на что не влияет.
+    cap_add:
+      - NET_ADMIN
     volumes:
       - ./xray:/usr/local/etc/xray:ro
     # Журнал подключений web.py раз в минуту переносит в data/hosts.json, поэтому

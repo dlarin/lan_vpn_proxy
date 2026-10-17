@@ -98,6 +98,7 @@ def config_settings(dotenv):
         "listen": setting(dotenv, "BIND_ADDR", "127.0.0.1"),
         "socks_port": int(setting(dotenv, "SOCKS_PORT", "1080")),
         "http_port": int(setting(dotenv, "HTTP_PORT", "3128")),
+        "tproxy_port": int(setting(dotenv, "TPROXY_PORT", "0")),
         "routing": {
             "mode": setting(dotenv, "ROUTING_MODE", "all"),
             "apps": split_list(setting(dotenv, "VPN_APPS")),
@@ -340,11 +341,25 @@ def routing_rules(routing):
     return rules
 
 
-def build_config(server, listen, socks_port, http_port, routing):
+def build_config(server, listen, socks_port, http_port, routing, tproxy_port=0):
     outbounds = list(server["outbounds"])
     if not any(o.get("tag") == "direct" for o in outbounds):
         outbounds.append({"tag": "direct", "protocol": "freedom"})
     sniffing = {"enabled": True, "destOverride": ["http", "tls"]}
+    inbounds = [
+        {"tag": "socks", "listen": listen, "port": socks_port, "protocol": "socks",
+         "settings": {"auth": "noauth", "udp": False}, "sniffing": sniffing},
+        {"tag": "http", "listen": listen, "port": http_port, "protocol": "http",
+         "settings": {}, "sniffing": sniffing},
+    ]
+    if tproxy_port:
+        # Прозрачный прокси для устройств, у которых этот компьютер — шлюз: nftables заворачивает
+        # их TCP и UDP сюда (TPROXY). Имя сайта — из TLS/HTTP/QUIC, чтобы работали правила по доменам
+        # и сервер VPN сам находил адрес, а не верил DNS провайдера.
+        inbounds.append({"tag": "tproxy", "listen": "0.0.0.0", "port": tproxy_port, "protocol": "dokodemo-door",
+                         "settings": {"network": "tcp,udp", "followRedirect": True},
+                         "streamSettings": {"sockopt": {"tproxy": "tproxy"}},
+                         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}})
     return {
         "log": {"loglevel": "warning"},
         # Через VPN = всё, что пришло в прокси (inbound), минус ушедшее напрямую (outbound direct).
@@ -353,12 +368,7 @@ def build_config(server, listen, socks_port, http_port, routing):
         "api": {"tag": "api", "listen": STATS_API, "services": ["StatsService"]},
         "policy": {"system": {"statsInboundUplink": True, "statsInboundDownlink": True,
                               "statsOutboundUplink": True, "statsOutboundDownlink": True}},
-        "inbounds": [
-            {"tag": "socks", "listen": listen, "port": socks_port, "protocol": "socks",
-             "settings": {"auth": "noauth", "udp": False}, "sniffing": sniffing},
-            {"tag": "http", "listen": listen, "port": http_port, "protocol": "http",
-             "settings": {}, "sniffing": sniffing},
-        ],
+        "inbounds": inbounds,
         "outbounds": outbounds,
         "routing": {"rules": routing_rules(routing)},
     }

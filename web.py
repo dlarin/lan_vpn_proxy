@@ -6,8 +6,10 @@
 трафик по дням (замер раз в минуту в data/traffic.json) и рабочий VPN Cisco Secure Client.
 Только стандартная библиотека Python.
 """
+import base64
 import collections
 import datetime
+import hmac
 import http.client
 import json
 import os
@@ -27,7 +29,7 @@ from xml.etree import ElementTree
 
 from gen_config import (DEFAULT_OUTPUT, ENV_FILE, OUTBOUNDS_FILE, PROJECT_DIR, SERVERS_FILE, STATS_API,
                         build_check_config, build_config, config_settings, load_env, set_env_value, setting,
-                        write_json)
+                        split_list, write_json)
 
 CONTAINER = "lan-vpn-proxy"
 WATCH_SERVICE = "lan-vpn-proxy-watch.service"
@@ -70,11 +72,16 @@ ICON_COLORS = {"on": "#52c41a", "off": "#8c8c8c", "warn": "#faad14"}  # цвет
 
 dotenv = load_env(ENV_FILE)
 WEB_PORT = int(setting(dotenv, "WEB_PORT", "8765"))
+# Адрес, на котором слушает интерфейс. Не 127.0.0.1 (например, 0.0.0.0 на домашнем сервере) —
+# только с WEB_PASSWORD: страница управляет Docker.
+WEB_BIND = setting(dotenv, "WEB_BIND", "127.0.0.1")
+WEB_PASSWORD = setting(dotenv, "WEB_PASSWORD", "")
 HTTP_PORT = setting(dotenv, "HTTP_PORT", "3128")
 SOCKS_PORT = setting(dotenv, "SOCKS_PORT", "1080")
 # Страница управляет Docker, поэтому отвечаем только на свои адреса: это защищает
 # от DNS rebinding и от запросов, которые чужой сайт отправит из браузера.
-ALLOWED_HOSTS = {f"127.0.0.1:{WEB_PORT}", f"localhost:{WEB_PORT}"}
+# WEB_HOSTS — адреса и имена, по которым страницу открывают из сети (192.168.0.141 и т.п.).
+ALLOWED_HOSTS = {f"{host}:{WEB_PORT}" for host in ["127.0.0.1", "localhost", *split_list(setting(dotenv, "WEB_HOSTS"))]}
 ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 ACTION_LOCK = threading.Lock()
 CHECK_LOCK = threading.Lock()
@@ -823,6 +830,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def authorized(self):
+        """Пароль (HTTP Basic, имя любое) — если задан WEB_PASSWORD. Без него — 401, браузер спросит пароль."""
+        if not WEB_PASSWORD:
+            return True
+        scheme, _, encoded = self.headers.get("Authorization", "").partition(" ")
+        try:
+            password = base64.b64decode(encoded, validate=True).decode().partition(":")[2]
+        except (ValueError, UnicodeDecodeError):
+            password = ""
+        if scheme.lower() == "basic" and hmac.compare_digest(password.encode(), WEB_PASSWORD.encode()):
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="lan-vpn-proxy", charset="UTF-8"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
     def allowed(self, action=False):
         if self.headers.get("Host") not in ALLOWED_HOSTS:
             return False
@@ -837,6 +861,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             return self.respond(403, {"error": "forbidden"})
+        if not self.authorized():
+            return
         url = urllib.parse.urlsplit(self.path)
         if url.path == "/":
             return self.respond(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -865,6 +891,8 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         if not self.allowed(action=True):
             return self.respond(403, {"error": "forbidden"})
+        if not self.authorized():
+            return
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
@@ -1481,8 +1509,10 @@ poll();
 def main():
     threading.Thread(target=collect_forever, daemon=True).start()
     threading.Thread(target=SOCKETS.run_forever, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", WEB_PORT), Handler)
-    print(f"веб-интерфейс: http://127.0.0.1:{WEB_PORT}", flush=True)
+    if WEB_BIND not in ("127.0.0.1", "localhost", "::1") and not WEB_PASSWORD:
+        sys.exit(f"WEB_BIND={WEB_BIND} без WEB_PASSWORD: страницу без пароля откроет любой в сети")
+    server = ThreadingHTTPServer((WEB_BIND, WEB_PORT), Handler)
+    print(f"веб-интерфейс: http://{WEB_BIND}:{WEB_PORT}", flush=True)
     server.serve_forever()
 
 
