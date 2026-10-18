@@ -201,7 +201,7 @@ xdg-open http://127.0.0.1:8765
 На домашнем сервере (Debian) Xray может работать прозрачным прокси для всех устройств сети: в DHCP роутера шлюзом указан сервер, nftables заворачивает TCP и UDP устройств в Xray (TPROXY), а Xray решает по «Правилам», что пустить через VPN. На устройствах ничего настраивать не нужно.
 
 - `.env`: `TPROXY_PORT=12345`, `PUID=0`, `PGID=0` (сокету TPROXY нужен root с `NET_ADMIN`), затем `./gen_config.py && docker compose up -d --force-recreate`.
-- nftables: цепочка `prerouting` с `tproxy ip to 127.0.0.1:12345` для устройств сети (кроме локальных адресов) и `meta mark 1 accept` во входящих.
+- nftables: таблица `inet vpn` с цепочкой `prerouting` и `tproxy ip to 127.0.0.1:12345` для устройств сети (кроме локальных адресов и DNS) — в `/etc/lan-vpn-proxy/tproxy.nft`, не в `nftables.conf`. Её включает служба `lan-vpn-proxy-gateway.service` (`gateway-watch.sh` → `/usr/local/sbin/lan-vpn-proxy-gateway`), только пока контейнер запущен: остановили — устройства ходят напрямую.
 - Маршрут: `ip rule add fwmark 1 lookup 100` и `ip route add local 0.0.0.0/0 dev lo table 100`; политика `FORWARD` Docker — `accept`, иначе у устройств пропадёт всё, кроме TCP и UDP.
 - `net.ipv4.ip_forward=1` и `send_redirects=0`: устройства и роутер в одной сети, без этого сервер отсылал бы устройства напрямую к роутеру.
 - Адрес сервера — статический, шлюз — роутер: по DHCP сервер получил бы шлюзом самого себя и остался бы без интернета.
