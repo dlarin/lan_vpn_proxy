@@ -581,9 +581,10 @@ def check_servers():
         ports = range(CHECK_FIRST_PORT, CHECK_FIRST_PORT + len(chains))
         _, image, _ = run("docker", "compose", "config", "--images")
         run("docker", "rm", "-f", CHECK_CONTAINER)  # остаток прерванной проверки
+        # Сеть хоста, как у основного контейнера: на шлюзе Docker не управляет iptables
+        # ("iptables": false), и в сети bridge у Xray нет ни выхода в интернет, ни проброса портов.
         ok, _, err = run("docker", "run", "-d", "--rm", "--name", CHECK_CONTAINER,
-                         "--user", f"{os.getuid()}:{os.getgid()}",
-                         "-p", f"127.0.0.1:{ports[0]}-{ports[-1]}:{ports[0]}-{ports[-1]}",
+                         "--user", f"{os.getuid()}:{os.getgid()}", "--network", "host",
                          "-v", f"{tmp}:/usr/local/etc/xray:ro", image)
         if not ok:
             return False, err

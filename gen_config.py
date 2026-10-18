@@ -387,7 +387,7 @@ def build_check_config(chains, first_port):
             if sockopt.get("dialerProxy") in tags:
                 sockopt["dialerProxy"] = tags[sockopt["dialerProxy"]]
             outbounds.append(outbound)
-        inbounds.append({"tag": f"in{i}", "listen": "0.0.0.0", "port": first_port + i, "protocol": "http"})
+        inbounds.append({"tag": f"in{i}", "listen": "127.0.0.1", "port": first_port + i, "protocol": "http"})
         rules.append({"type": "field", "inboundTag": [f"in{i}"], "outboundTag": tags[chain[0].get("tag")]})
     return {"log": {"loglevel": "warning"}, "inbounds": inbounds, "outbounds": outbounds, "routing": {"rules": rules}}
 
