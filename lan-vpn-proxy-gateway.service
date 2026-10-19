@@ -4,6 +4,9 @@ After=docker.service nftables.service network-online.target
 Requires=docker.service
 
 [Service]
+# пакеты с меткой 1 (TPROXY) доставляются локально — в Xray
+ExecStartPre=/bin/sh -c 'ip rule | grep -q "fwmark 0x1 lookup 100" || ip rule add fwmark 1 lookup 100'
+ExecStartPre=/usr/sbin/ip route replace local 0.0.0.0/0 dev lo table 100
 ExecStart=/usr/local/sbin/lan-vpn-proxy-gateway
 # служба остановлена — устройства ходят напрямую
 ExecStopPost=-/usr/sbin/nft delete table inet vpn

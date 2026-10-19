@@ -1,0 +1,21 @@
+# Создан install-gateway.sh из gateway/tproxy.nft.in — правьте шаблон в репозитории, а не этот файл.
+# Загружает lan-vpn-proxy-gateway.service, только пока запущен контейнер lan-vpn-proxy.
+# VPN для устройств сети: TCP и UDP в интернет заворачиваются в Xray (TPROXY на @PORT@),
+# он по «Правилам» решает, что пустить через VPN. Маршрут для fwmark 1 ставит та же служба.
+table inet vpn {
+	set local {
+		type ipv4_addr; flags interval;
+		elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+			     172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
+	}
+
+	chain prerouting {
+		type filter hook prerouting priority mangle; policy accept;
+		iifname != "@IFACE@" return
+		ip saddr != @LAN@ return
+		ip daddr @local return
+		# DNS — мимо Xray, к тому DNS, что раздаёт сеть
+		th dport 53 return
+		meta l4proto { tcp, udp } meta mark set 1 tproxy ip to 127.0.0.1:@PORT@ accept
+	}
+}
