@@ -1,6 +1,6 @@
 services:
   xray:
-    image: ghcr.io/xtls/xray-core:26.7.28
+    image: ghcr.io/xtls/xray-core:26.10.17
     container_name: lan-vpn-proxy
     restart: unless-stopped
     # Свой uid, чтобы xray мог читать config.json с правами 600.

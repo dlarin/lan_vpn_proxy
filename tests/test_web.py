@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -153,6 +154,59 @@ class SaveRules(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.env, {})
         web.restart_if_running.assert_not_called()
+
+
+class DevicesTest(unittest.TestCase):
+    MAC = "5a:a1:3c:77:fb:d8"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.devices = web.Devices(os.path.join(self.dir.name, "devices.json"))
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_neighbours_parsing(self):
+        out = ("192.168.0.1 dev enp2s0 lladdr 74:DA:88:13:85:F8 REACHABLE\n"
+               "192.168.0.178 dev enp2s0 FAILED\n"
+               f"192.168.0.184 dev enp2s0 lladdr {self.MAC} STALE")
+        with mock.patch.object(web, "run", return_value=(True, out, "")):
+            self.assertEqual(web.Devices.neighbours(), {"192.168.0.1": "74:da:88:13:85:f8", "192.168.0.184": self.MAC})
+
+    def test_key_by_mac_and_fallback_to_ip(self):
+        self.assertEqual(self.devices.key_for("192.168.0.184", {"192.168.0.184": self.MAC}), "устройство " + self.MAC)
+        self.assertEqual(self.devices.key_for("192.168.0.178", {}), "устройство 192.168.0.178")
+
+    def test_rename_and_labels(self):
+        self.devices.key_for("192.168.0.184", {"192.168.0.184": self.MAC})
+        self.assertEqual(self.devices.resolve("устройство " + self.MAC), ("устройство 192.168.0.184", self.MAC))
+        self.assertTrue(self.devices.rename({"device": self.MAC.upper(), "name": "Телефон"})[0])
+        self.assertEqual(self.devices.resolve("устройство " + self.MAC), ("Телефон", self.MAC))
+        # старая запись статистики по IP получает имя устройства с этим адресом
+        self.assertEqual(self.devices.resolve("устройство 192.168.0.184"), ("Телефон", self.MAC))
+        self.assertEqual(self.devices.resolve("firefox"), ("firefox", None))
+        # имя переживает перезапуск
+        self.assertEqual(web.Devices(self.devices.path).resolve("устройство " + self.MAC)[0], "Телефон")
+        self.assertTrue(self.devices.rename({"device": self.MAC, "name": ""})[0])
+        self.assertEqual(self.devices.resolve("устройство " + self.MAC)[0], "устройство 192.168.0.184")
+
+    def test_summary_merges_ip_and_mac_records(self):
+        self.devices.key_for("192.168.0.184", {"192.168.0.184": self.MAC})
+        log = web.HostLog(os.path.join(self.dir.name, "hosts.json"))
+        today = web.datetime.date.today().isoformat()
+        log.data["days"] = {today: {"устройство 192.168.0.184": {"youtube.com": 5}, "устройство " + self.MAC: {"t.me": 2}}}
+        with mock.patch.object(web, "DEVICES", self.devices):
+            summary = log.summary(1, False)
+            self.assertEqual([(a["app"], a["count"]) for a in summary["apps"]], [("устройство " + self.MAC, 7)])
+            # фильтр по устройству — по объединённому ключу
+            self.assertEqual(log.summary(1, False, "устройство " + self.MAC)["total"], 7)
+
+    def test_rename_rejects_bad_input(self):
+        self.devices.key_for("192.168.0.184", {"192.168.0.184": self.MAC})
+        for body in ({"device": "aa:bb:cc:dd:ee:ff", "name": "x"}, {"device": "../etc", "name": "x"},
+                     {"device": self.MAC, "name": "x" * 41}, {"device": self.MAC, "name": "a\nb"}, None):
+            with self.subTest(body=body):
+                self.assertFalse(self.devices.rename(body)[0])
 
 
 if __name__ == "__main__":

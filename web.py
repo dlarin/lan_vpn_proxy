@@ -43,6 +43,10 @@ TRAFFIC_DAYS_SHOWN = 7
 HOSTS_FILE = os.path.join(PROJECT_DIR, "data", "hosts.json")
 HOSTS_DAYS_KEPT = 30
 HOSTS_SHOWN = 100
+# Устройства сети (шлюз): имена по MAC-адресу — IP по DHCP меняется, а MAC нет.
+DEVICES_FILE = os.path.join(PROJECT_DIR, "data", "devices.json")
+DEVICE_PREFIX = "устройство "
+MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 # 2026/10/11 18:50:29.431418 from 127.0.0.1:43610 accepted //example.com:443 [http >> proxy]
 ACCESS_LINE = re.compile(
     r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d\.\d+) from (\S+) accepted (\S+) \[\S+ (?:>>|->) (\S+)\]")
@@ -314,6 +318,74 @@ class ClientSockets:
 SOCKETS = ClientSockets()
 
 
+class Devices:
+    """Устройства сети, которые ходят через шлюз: MAC → последний IP и имя, которое дал пользователь."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        try:
+            with open(path, encoding="utf-8") as f:
+                self.data = json.load(f)
+        except (FileNotFoundError, ValueError):
+            self.data = {}
+
+    @staticmethod
+    def neighbours():
+        """IP → MAC из таблицы соседей: устройство, которое только что подключалось, в ней есть."""
+        _, out, _ = run("ip", "neigh", "show", timeout=5)
+        table = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if "lladdr" in parts:
+                table[parts[0]] = parts[parts.index("lladdr") + 1].lower()
+        return table
+
+    def key_for(self, ip, neighbours):
+        """Ключ для статистики: «устройство <MAC>», а если MAC не узнать — «устройство <IP>»."""
+        mac = neighbours.get(ip)
+        if not mac:
+            return DEVICE_PREFIX + ip
+        with self.lock:
+            self.data.setdefault(mac, {})["ip"] = ip
+        return DEVICE_PREFIX + mac
+
+    def save(self):
+        with self.lock:
+            write_json(self.path, self.data)
+
+    def resolve(self, app):
+        """(подпись, MAC или None) для строки статистики."""
+        if not app.startswith(DEVICE_PREFIX):
+            return app, None
+        ident = app[len(DEVICE_PREFIX):]
+        with self.lock:
+            if not MAC.match(ident):  # старая запись по IP — ищем устройство с этим адресом
+                ident = next((mac for mac, d in self.data.items() if d.get("ip") == ident), ident)
+            device = self.data.get(ident)
+        if not device:
+            return app, None
+        return device.get("name") or DEVICE_PREFIX + device.get("ip", ident), ident
+
+    def rename(self, body):
+        mac = str((body or {}).get("device", "")).lower() if isinstance(body, dict) else ""
+        name = str(body.get("name", "")).strip() if isinstance(body, dict) else ""
+        if not MAC.match(mac) or mac not in self.data:
+            return False, "Нет такого устройства"
+        if len(name) > 40 or any(not c.isprintable() for c in name):
+            return False, "Имя — до 40 обычных символов"
+        with self.lock:
+            if name:
+                self.data[mac]["name"] = name
+            else:
+                self.data[mac].pop("name", None)
+            write_json(self.path, self.data)
+        return True, f"Устройство {self.data[mac].get('ip', mac)}: " + (f"«{name}»" if name else "имя убрано")
+
+
+DEVICES = Devices(DEVICES_FILE)
+
+
 class HostLog:
     """Отладка: подключения через VPN по приложениям, хостам и дням — из журнала доступа Xray (docker logs)."""
 
@@ -341,6 +413,7 @@ class HostLog:
             if not ok:
                 return
             last = self.data["last"]
+            neighbours = None  # таблицу соседей читаем, только если есть подключения из сети
             for line in (out + "\n" + err).splitlines():
                 match = ACCESS_LINE.match(line)
                 # --since берём с запасом, а уже учтённые строки отсекаем по их времени.
@@ -354,8 +427,10 @@ class HostLog:
                 source_ip = source_ip.strip("[]")
                 if source_ip in ("127.0.0.1", "::1"):
                     app = SOCKETS.app_for(int(source_port), at.timestamp()) or UNKNOWN_APP
-                else:
-                    app = f"устройство {source_ip}"  # BIND_ADDR=0.0.0.0: клиент из локальной сети
+                else:  # шлюз или BIND_ADDR=0.0.0.0: устройство из локальной сети
+                    if neighbours is None:
+                        neighbours = DEVICES.neighbours()
+                    app = DEVICES.key_for(source_ip, neighbours)
                 hosts = self.data["days"].setdefault(at.astimezone().date().isoformat(), {}).setdefault(app, {})
                 host = host_of(match[3])
                 hosts[host] = hosts.get(host, 0) + 1
@@ -365,6 +440,8 @@ class HostLog:
             for old in sorted(self.data["days"])[:-HOSTS_DAYS_KEPT]:
                 del self.data["days"][old]
             write_json(self.path, self.data)  # это история посещений — права 600
+            if neighbours:
+                DEVICES.save()
 
     def reset(self):
         """Стирает статистику; считать начинаем с этого момента, а не с начала журнала контейнера."""
@@ -381,11 +458,15 @@ class HostLog:
         cutoff = (datetime.date.today() - datetime.timedelta(days=days - 1)).isoformat()
         apps, hosts = collections.Counter(), collections.Counter()
         host_apps = collections.defaultdict(collections.Counter)
+        labels = {}  # ключ статистики → (подпись, MAC); старые записи по IP и новые по MAC — одно устройство
         with self.lock:
             for day, by_app in self.data["days"].items():
                 if day < cutoff:
                     continue
                 for name, by_host in by_app.items():
+                    label, mac = DEVICES.resolve(name)
+                    name = DEVICE_PREFIX + mac if mac else name
+                    labels[name] = (label, mac)
                     for host, n in by_host.items():
                         apps[name] += n
                         if app in (None, name):
@@ -395,11 +476,12 @@ class HostLog:
         top = hosts.most_common(HOSTS_SHOWN)
         total = sum(hosts.values())
         return {
-            "apps": [{"app": name, "count": n} for name, n in apps.most_common()],
+            "apps": [{"app": name, "label": labels[name][0], "device": labels[name][1], "count": n}
+                     for name, n in apps.most_common()],
             "apps_total": sum(apps.values()),
             "total": total,
             "hosts_total": len(hosts),
-            "hosts": [{"host": host, "count": n, "apps": [a for a, _ in host_apps[host].most_common(3)]}
+            "hosts": [{"host": host, "count": n, "apps": [labels[a][0] for a, _ in host_apps[host].most_common(3)]}
                       for host, n in top],
             "other_hosts": len(hosts) - len(top),
             "other_count": total - sum(n for _, n in top),
@@ -1041,6 +1123,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/select": lambda: select_server(body.get("index") if isinstance(body, dict) else None),
             "/api/rules": lambda: save_rules(body),
             "/api/hosts/reset": HOSTS.reset,
+            "/api/devices/name": lambda: DEVICES.rename(body),
             "/api/cisco/connect": lambda: CISCO.connect(body),
             "/api/cisco/disconnect": CISCO.disconnect,
         }.get(self.path)

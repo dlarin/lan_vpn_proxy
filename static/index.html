@@ -70,6 +70,7 @@
            border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 2px 0 rgba(0, 0, 0, .02);
            cursor: pointer; transition: all .2s cubic-bezier(.645, .045, .355, 1); }
   button:hover { color: var(--primary-hover); border-color: var(--primary-hover); }
+  button.small { height: 24px; padding: 0 7px; font-size: 12px; margin-top: 4px; }
   button:active { color: var(--primary-active); border-color: var(--primary-active); }
   button.primary { color: #fff; background: var(--primary); border-color: var(--primary);
                    box-shadow: 0 2px 0 var(--primary-shadow); }
@@ -517,6 +518,26 @@ function share(n, total) {
   return p < 0.1 ? '<0,1 %' : p.toLocaleString('ru', {maximumFractionDigits: 1}) + ' %';
 }
 
+// Устройство сети: подпись и кнопка «Переименовать» (имя хранится по MAC-адресу в data/devices.json).
+function appCell(a) {
+  if (!a.device) return a.label;
+  const cell = document.createElement('span'), addr = document.createElement('span'), button = document.createElement('button');
+  cell.textContent = a.label;
+  addr.className = 'addr';
+  addr.textContent = a.device;
+  button.textContent = 'Переименовать';
+  button.className = 'small';
+  button.onclick = async () => {
+    const name = prompt('Имя устройства ' + a.device + ' (пусто — убрать имя):', a.label.startsWith('устройство ') ? '' : a.label);
+    if (name === null) return;
+    const r = await post('devices/name', {device: a.device, name});
+    if (!r.ok) alert(r.message);
+    loadHosts();
+  };
+  cell.append(addr, ' ', button);
+  return cell;
+}
+
 async function loadHosts() {
   const app = $('hosts-app').value, group = $('hosts-group').checked ? 1 : 0;
   const query = new URLSearchParams({days: $('hosts-days').value, group, app});
@@ -525,10 +546,10 @@ async function loadHosts() {
   catch (e) { $('hosts-total').textContent = 'Нет связи с веб-интерфейсом: ' + e; return; }
   const count = n => n.toLocaleString('ru');
 
-  const apps = r.apps.map(a => row([a.app, count(a.count), share(a.count, r.apps_total)], a.app === app ? 'current' : ''));
+  const apps = r.apps.map(a => row([appCell(a), count(a.count), share(a.count, r.apps_total)], a.app === app ? 'current' : ''));
   $('apps').replaceChildren(...(apps.length ? apps : [emptyRow('Подключений через VPN за этот период не было', 3)]));
   // Список приложений в фильтре берём из ответа, выбранное оставляем, даже если за период его нет.
-  const options = [['', 'Все приложения'], ...r.apps.map(a => [a.app, a.app])];
+  const options = [['', 'Все приложения'], ...r.apps.map(a => [a.app, a.label])];
   if (app && !r.apps.some(a => a.app === app)) options.push([app, app]);
   $('hosts-app').replaceChildren(...options.map(([value, text]) => {
     const option = document.createElement('option');
