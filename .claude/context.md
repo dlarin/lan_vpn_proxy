@@ -6,7 +6,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 Заменить VPN-клиент Happ на ноутбуке (Ubuntu, GNOME) на Xray в Docker. Правило пользователя: **контейнер запущен — трафик через VPN, остановлен — напрямую.** Плюс управление рабочим VPN Cisco Secure Client из того же веб-интерфейса. Второй вариант установки — домашний сервер (Debian) как шлюз с VPN для всех устройств сети. Подробности и команды — в `README.md`.
 
 ## Текущее состояние
-- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`: gen_config, web, auto, shellcheck в Docker), `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
+- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`, 45: gen_config, web, auto, shellcheck в Docker), резервная копия — `backup-green.sh` + `lan-vpn-proxy-backup.{service,timer}`, `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
 - Git: всё закоммичено и запушено в приватный `dlarin/lan_vpn_proxy` (`origin`, SSH, ветка `master`).
 - Работает (проверено 2026-10-12):
   - подписка задана в `.env`, `SERVER` пустой (первый сервер), `ROUTING_MODE=filter`, `DIRECT_HOSTS` задан;
@@ -23,7 +23,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 - Домашний сервер `green` (Debian) — шлюз с VPN для всей сети (в DHCP роутера шлюзом указан он; ноутбук дома тоже ходит через него):
   - доступ: `ssh dima@192.168.0.2` по ключу (имя `green` на ноутбуке уходит в рабочий домен — не использовать); `sudo` без пароля;
   - проект — `~/lan_vpn_proxy`, **без git**: обновлять `scp` и перезапуском по README, «Шлюз → Обновление»; установка — `sudo ./install-gateway.sh` (повторяемый); доступа к GitHub у `green` нет;
-  - на 2026-10-19 файлы совпадают с `dd45202`; в `.env`: `TPROXY_PORT=12345`, `PUID=0`, `WEB_BIND=0.0.0.0`, `WEB_HOSTS=192.168.0.2`, `AUTO_SWITCH=on`, `SUBSCRIPTION_REFRESH=24`, `COMPOSE_FILE=docker-compose.yml:gateway/compose.yml`;
+  - на 2026-10-19 файлы совпадают с `bf42345`; в `.env`: `TPROXY_PORT=12345`, `PUID=0`, `WEB_BIND=0.0.0.0`, `WEB_HOSTS=192.168.0.2`, `AUTO_SWITCH=on`, `SUBSCRIPTION_REFRESH=24`, `COMPOSE_FILE=docker-compose.yml:gateway/compose.yml`;
   - TPROXY: таблица `inet vpn` из `/etc/lan-vpn-proxy/tproxy.nft` (шаблон `gateway/tproxy.nft.in`) есть, только пока контейнер запущен (`gateway-watch.sh`); маршрут `fwmark 1 → table 100` ставит служба шлюза; прямые подключения к порту 12345 закрыты;
   - веб-интерфейс `https://192.168.0.2:8765` (самоподписанный сертификат, пароль, блокировка после 5 неверных за 15 мин);
   - чужое, не трогать: таблица `inet gw` в `/etc/nftables.conf` (DNS на AdGuard, forward), контейнеры `jarvis-*`, `loop`; копия старого `/etc/network/interfaces.d/wired` — `/root/wired.bak`.
@@ -63,6 +63,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 - Автопереключение не возвращается на прежний сервер, когда тот оживёт: лишние переключения рвут соединения. Если не работает ни один сервер — ничего не меняем (скорее нет интернета).
 - `SUBSCRIPTION_REFRESH` обновляет только список и ключи (`gen_config.py -o` во временный файл), рабочий конфиг не трогает — иначе ротация адресов провайдера перезапускала бы VPN каждый раз.
 - Шлюз — `gateway/compose.yml` поверх основного (через `COMPOSE_FILE` в `.env`, ставит `install-gateway.sh`): без `pid: host`, AppArmor по умолчанию, `cap_drop: ALL` + `NET_ADMIN` (TPROXY) + `DAC_READ_SEARCH` (root читает `config.json` с правами 600 пользователя), `read_only`, `no-new-privileges`. Root остаётся: Docker не даёт ambient-capabilities не-root процессу.
+- Контекст обновляется автоматически: хук Claude Code `Stop` (`.claude/settings.json` → `.claude/hooks/context-check.sh`) не даёт закончить ответ, если после последнего изменения `context.md` есть коммиты. Обновление молчаливое, без коммита. Правка контекста ещё не закоммичена или хук уже срабатывал в этом ответе — пропускает.
 - Отвергнуто: sing-box, proxychains (ничего не ставить); policy routing через `ip rule`/`nft`.
 
 ## Предпочтения пользователя
@@ -103,7 +104,8 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 - `green`: получен SSH-доступ; `install-gateway.sh` и шаблон правил вместо ручных файлов. Git на сервере сделали и по решению пользователя убрали.
 - Шлюз: TPROXY-порт закрыт извне; контейнер с урезанными правами (`gateway/compose.yml`); IPv6 в сети нет — утечки нет.
 - Автопереключение на рабочий сервер и ежедневное обновление подписки — включено на `green`.
-- Страница вынесена в `static/index.html`; тесты: 40 (gen_config, web, auto, shellcheck); всё запушено (`dd45202`).
+- Страница вынесена в `static/index.html`; тесты: 45 (gen_config, web, auto, shellcheck).
+- Имена устройств сети по MAC на вкладке «Хосты»; Xray обновлён до `26.10.17`; резервная копия `.env` и `data/` с `green` раз в день; интерфейс понимает режим шлюза (ложное предупреждение о `lan-vpn-proxy-watch` на `green` убрано). Всё запушено (`bf42345`).
 
 ### 2026-10-12 — Cisco, «Всегда напрямую», GitHub, оформление
 - Сверили контекст с репозиторием; заменили почту автора во всей истории (`filter-branch`), хеши коммитов изменились.
