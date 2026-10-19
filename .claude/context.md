@@ -6,7 +6,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 Заменить VPN-клиент Happ на ноутбуке (Ubuntu, GNOME) на Xray в Docker. Правило пользователя: **контейнер запущен — трафик через VPN, остановлен — напрямую.** Плюс управление рабочим VPN Cisco Secure Client из того же веб-интерфейса. Второй вариант установки — домашний сервер (Debian) как шлюз с VPN для всех устройств сети. Подробности и команды — в `README.md`.
 
 ## Текущее состояние
-- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`), `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
+- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`: gen_config, web, auto, shellcheck в Docker), `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
 - Git: всё закоммичено и запушено в приватный `dlarin/lan_vpn_proxy` (`origin`, SSH, ветка `master`).
 - Работает (проверено 2026-10-12):
   - подписка задана в `.env`, `SERVER` пустой (первый сервер), `ROUTING_MODE=filter`, `DIRECT_HOSTS` задан;
@@ -27,7 +27,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 
 ## Открытые задачи
 - [ ] `green` обновлён 2026-10-19 (`web.py`, установщик): HTTPS отвечает, без пароля 401. Пользователю — подтвердить вход из браузера по `https://192.168.0.2:8765`.
-- [ ] Другие рекомендации из ревью 2026-10-19 (пользователь пока не выбрал): шлюз в отдельный сервис compose без `pid: host` (сейчас Xray от root с доступом к процессам хоста); проверить DNS устройств сети; отдельный профиль compose для шлюза, уведомление о падении `green`, устройства на вкладке «Хосты», 
+- [ ] Другие рекомендации из ревью 2026-10-19 (пользователь пока не выбрал): шлюз в отдельный сервис compose без `pid: host` (сейчас Xray от root с доступом к процессам хоста); проверить DNS устройств сети; уведомление о падении `green`, устройства на вкладке «Хосты», 
 
 ## Решения
 - В Docker — Xray, а не сам Happ: Happ — GUI-обёртка, внутри у него тот же Xray.
@@ -53,6 +53,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 - Проверка текущего сервера — через отдельный вход `health` (правило первым, `inboundTag → proxy`): обычный HTTP-вход в режиме filter отправил бы проверочный запрос напрямую. Вход исключён из учёта трафика.
 - Автопереключение не возвращается на прежний сервер, когда тот оживёт: лишние переключения рвут соединения. Если не работает ни один сервер — ничего не меняем (скорее нет интернета).
 - `SUBSCRIPTION_REFRESH` обновляет только список и ключи (`gen_config.py -o` во временный файл), рабочий конфиг не трогает — иначе ротация адресов провайдера перезапускала бы VPN каждый раз.
+- Шлюз — `gateway/compose.yml` поверх основного (через `COMPOSE_FILE` в `.env`, ставит `install-gateway.sh`): без `pid: host`, AppArmor по умолчанию, `cap_drop: ALL` + `NET_ADMIN` (TPROXY) + `DAC_READ_SEARCH` (root читает `config.json` с правами 600 пользователя), `read_only`, `no-new-privileges`. Root остаётся: Docker не даёт ambient-capabilities не-root процессу.
 - Отвергнуто: sing-box, proxychains (ничего не ставить); policy routing через `ip rule`/`nft`.
 
 ## Предпочтения пользователя
@@ -81,6 +82,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 - TLS-рукопожатие — в потоке запроса (`do_handshake_on_connect=False`), иначе медленный клиент блокирует `accept`; ошибки `ssl.SSLError` (открыли `http://`) глушатся в `Handler.handle`.
 - `gen_config.py` при каждом запуске заново качает подписку, а провайдер раздаёт адреса по очереди (`rucash`/`rucash2`) — конфиг каждый раз другой. Поэтому `install-gateway.sh` собирает конфиг только если его нет.
 - IPv6 в домашней сети нет (2026-10-19: у `green` и ноутбука только `fe80::`), поэтому правила шлюза только для IPv4. Если роутер или провайдер включат IPv6 — устройства пойдут по нему мимо VPN, нужны правила для `ip6`.
+- В compose `!reset` для списка сбрасывает и новое значение — для замены списка нужен `!override` (Compose ≥ 2.24; на `green` 2.26).
 - Ключ REALITY в тестах должен быть в формате x25519 (32 байта base64url) — иначе `xray run -test` отвергает конфиг.
 - Тестировать `web.py` на свободном порту: `WEB_BIND=127.0.0.2 WEB_PORT=… WEB_HOSTS=127.0.0.2 WEB_PASSWORD=… timeout 6 python3 web.py` (переменные окружения важнее `.env`); созданный `data/web.*` потом удалить.
 - Контейнеры `jarvis-*` теперь ходят напрямую; если им нужен VPN, надо прописать прокси.

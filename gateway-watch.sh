@@ -3,14 +3,14 @@
 # запущен. Остановили контейнер — таблица nftables удаляется, и устройства ходят напрямую, а не
 # упираются в закрытый порт. Работает от root (служба lan-vpn-proxy-gateway.service).
 NAME=lan-vpn-proxy
-TABLE="inet vpn"
+TABLE=(inet vpn)  # семейство и имя таблицы nftables
 RULES=${RULES:-/etc/lan-vpn-proxy/tproxy.nft}
 
 sync() {
     if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ]; then
-        nft list table $TABLE >/dev/null 2>&1 || { nft -f "$RULES" && echo "VPN для сети включён"; }
+        nft list table "${TABLE[@]}" >/dev/null 2>&1 || { nft -f "$RULES" && echo "VPN для сети включён"; }
     else
-        nft delete table $TABLE 2>/dev/null && echo "VPN для сети выключен: напрямую"
+        nft delete table "${TABLE[@]}" 2>/dev/null && echo "VPN для сети выключен: напрямую"
     fi
 }
 

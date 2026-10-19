@@ -1,0 +1,18 @@
+# Дополнение docker-compose.yml для шлюза (домашний сервер): install-gateway.sh подключает его через
+# COMPOSE_FILE в .env. Xray здесь работает от root (сокету TPROXY нужен NET_ADMIN), поэтому прав
+# ему оставляем ровно столько, сколько нужно для прозрачного прокси.
+services:
+  xray:
+    # Правила по приложениям для устройств сети не работают — процессы сервера Xray видеть незачем.
+    pid: !reset null
+    # Обычный профиль AppArmor docker-default: читать /proc процессов хоста больше не нужно.
+    security_opt: !override
+      - no-new-privileges:true
+    # Из всех прав root — только NET_ADMIN (сокет с IP_TRANSPARENT) и чтение config.json,
+    # который принадлежит пользователю и закрыт правами 600.
+    cap_drop:
+      - ALL
+    cap_add: !override
+      - NET_ADMIN
+      - DAC_READ_SEARCH
+    read_only: true

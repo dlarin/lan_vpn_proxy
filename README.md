@@ -226,6 +226,7 @@ sudo ./install-gateway.sh
 - кладёт правила nftables (таблица `inet vpn`) из шаблона `gateway/tproxy.nft.in` в `/etc/lan-vpn-proxy/tproxy.nft`. Интерфейс и сеть устройств берёт из маршрута по умолчанию, их можно задать в `.env`: `GATEWAY_IFACE`, `GATEWAY_LAN`;
 - включает `ip_forward` и выключает `send_redirects` (`/etc/sysctl.d/90-lan-vpn-proxy.conf`): устройства и роутер в одной сети, без этого сервер отсылал бы устройства напрямую к роутеру;
 - ставит системную службу `lan-vpn-proxy-gateway.service` (`gateway-watch.sh` → `/usr/local/sbin/lan-vpn-proxy-gateway`). Она добавляет маршрут `fwmark 1 → table 100` и держит таблицу `inet vpn`, только пока запущен контейнер: остановили его — устройства ходят напрямую;
+- прописывает в `.env` `COMPOSE_FILE=docker-compose.yml:gateway/compose.yml`: контейнер шлюза работает без `pid: host` и `apparmor=unconfined`, из прав root у него только `NET_ADMIN` (для TPROXY) и чтение `config.json`, файловая система только для чтения;
 - ставит пользовательскую службу веб-интерфейса и включает linger, собирает конфиг Xray (только если его ещё нет) и запускает контейнер.
 
 Что настроить вручную:
@@ -240,7 +241,7 @@ sudo ./install-gateway.sh
 - `gen_config.py` или `docker-compose.yml` — `./gen_config.py && docker compose up -d --force-recreate`;
 - `web.py` или `static/` — `systemctl --user restart lan-vpn-proxy-web.service`.
 
-Правила по приложениям (`VPN_APPS`) для чужих устройств не работают — Xray видит только процессы сервера. Если сервер выключен, интернет пропадает у всей сети: верните шлюзом роутер в его настройках DHCP.
+Правила по приложениям (`VPN_APPS`) на шлюзе не работают: Xray не видит процессов (`gateway/compose.yml`). Если сервер выключен, интернет пропадает у всей сети: верните шлюзом роутер в его настройках DHCP.
 
 ## Тесты
 
@@ -248,7 +249,12 @@ sudo ./install-gateway.sh
 python3 -m unittest discover tests
 ```
 
-Тесты проверяют разбор ссылок и подписок, чтение и запись `.env`, порядок правил маршрутизации и сборку конфига. Собранный конфиг дополнительно проверяет сам Xray в Docker (`run -test`), без Docker эта проверка пропускается. Пропустить её явно — `XRAY_TEST=0`. Ключи в тестах выдуманные, сеть не нужна.
+- `test_gen_config.py` — разбор ссылок и подписок, чтение и запись `.env`, порядок правил маршрутизации, сборка конфига. Собранный конфиг дополнительно проверяет сам Xray в Docker (`run -test`), пропустить — `XRAY_TEST=0`.
+- `test_web.py` — веб-интерфейс на свободном порту: проверка Host и Origin, пароль и блокировка подбора, сохранение правил.
+- `test_auto.py` — автопереключение серверов.
+- `test_shell.py` — `shellcheck` для `*.sh` в Docker, пропустить — `SHELLCHECK=0`.
+
+Без Docker проверки через Docker пропускаются. Ключи в тестах выдуманные, к сети, Docker-контейнерам проекта и GNOME тесты не обращаются.
 
 ## Диагностика
 

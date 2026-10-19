@@ -83,6 +83,13 @@ fi
 # Xray: конфиг собираем только при первой установке — gen_config.py каждый раз заново скачивает
 # подписку, а провайдер раздаёт адреса по очереди, и контейнер перезапускался бы без нужды.
 cd "$DIR"
+# Права контейнера для шлюза — gateway/compose.yml поверх docker-compose.yml. Через .env, чтобы и web.py,
+# и docker compose вручную работали с тем же набором файлов.
+if [ "$(env_get COMPOSE_FILE)" != "docker-compose.yml:gateway/compose.yml" ]; then
+    as_user python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from gen_config import set_env_value
+set_env_value(sys.argv[1] + "/.env", "COMPOSE_FILE", "docker-compose.yml:gateway/compose.yml")' "$DIR"
+    echo "в .env: COMPOSE_FILE=docker-compose.yml:gateway/compose.yml"
+fi
 [ -f xray/config.json ] || as_user ./gen_config.py
 as_user docker compose up -d
 
