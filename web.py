@@ -11,11 +11,13 @@ import collections
 import datetime
 import hmac
 import http.client
+import ipaddress
 import json
 import os
 import re
 import select
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -76,13 +78,24 @@ WEB_PORT = int(setting(dotenv, "WEB_PORT", "8765"))
 # только с WEB_PASSWORD: страница управляет Docker.
 WEB_BIND = setting(dotenv, "WEB_BIND", "127.0.0.1")
 WEB_PASSWORD = setting(dotenv, "WEB_PASSWORD", "")
+# HTTPS: без него пароль идёт по сети открытым текстом. auto — включён, если интерфейс открыт для сети.
+WEB_TLS = setting(dotenv, "WEB_TLS", "auto")
+WEB_TLS = WEB_TLS == "on" or (WEB_TLS == "auto" and WEB_BIND not in ("127.0.0.1", "localhost", "::1"))
+# Самоподписанный сертификат: создаётся при первом запуске и заново, если поменялся WEB_HOSTS.
+WEB_CERT = os.path.join(PROJECT_DIR, "data", "web.crt")
+WEB_KEY = os.path.join(PROJECT_DIR, "data", "web.key")
+# Подбор пароля: после LOGIN_MAX_FAILS неверных паролей за LOGIN_WINDOW секунд адрес ждёт до конца окна.
+LOGIN_MAX_FAILS = 5
+LOGIN_WINDOW = 15 * 60
+LOGIN_FAILS = collections.defaultdict(list)  # адрес -> время неверных попыток
+LOGIN_LOCK = threading.Lock()
 HTTP_PORT = setting(dotenv, "HTTP_PORT", "3128")
 SOCKS_PORT = setting(dotenv, "SOCKS_PORT", "1080")
 # Страница управляет Docker, поэтому отвечаем только на свои адреса: это защищает
 # от DNS rebinding и от запросов, которые чужой сайт отправит из браузера.
 # WEB_HOSTS — адреса и имена, по которым страницу открывают из сети (192.168.0.141 и т.п.).
 ALLOWED_HOSTS = {f"{host}:{WEB_PORT}" for host in ["127.0.0.1", "localhost", *split_list(setting(dotenv, "WEB_HOSTS"))]}
-ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
+ALLOWED_ORIGINS = {f"{'https' if WEB_TLS else 'http'}://{host}" for host in ALLOWED_HOSTS}
 ACTION_LOCK = threading.Lock()
 CHECK_LOCK = threading.Lock()
 # Результат последней проверки: задержка в мс по названию сервера, None — не работает.
@@ -831,17 +844,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def handle(self):
+        try:
+            super().handle()
+        except ssl.SSLError:
+            pass  # открыли http:// вместо https:// или браузер не принял сертификат — не засоряем журнал
+
     def authorized(self):
         """Пароль (HTTP Basic, имя любое) — если задан WEB_PASSWORD. Без него — 401, браузер спросит пароль."""
         if not WEB_PASSWORD:
             return True
-        scheme, _, encoded = self.headers.get("Authorization", "").partition(" ")
+        client, now = self.client_address[0], time.time()
+        with LOGIN_LOCK:
+            fails = LOGIN_FAILS[client] = [t for t in LOGIN_FAILS[client] if now - t < LOGIN_WINDOW]
+            if len(fails) >= LOGIN_MAX_FAILS:
+                self.respond(429, {"error": "слишком много неверных паролей, попробуйте позже"})
+                return False
+        header = self.headers.get("Authorization")
+        scheme, _, encoded = (header or "").partition(" ")
         try:
             password = base64.b64decode(encoded, validate=True).decode().partition(":")[2]
         except (ValueError, UnicodeDecodeError):
             password = ""
         if scheme.lower() == "basic" and hmac.compare_digest(password.encode(), WEB_PASSWORD.encode()):
+            with LOGIN_LOCK:
+                LOGIN_FAILS.pop(client, None)
             return True
+        if header:  # первый запрос браузера идёт без пароля — это не попытка
+            with LOGIN_LOCK:
+                LOGIN_FAILS[client].append(now)
+            print(f"неверный пароль веб-интерфейса с {client}", flush=True)
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="lan-vpn-proxy", charset="UTF-8"')
         self.send_header("Content-Length", "0")
@@ -1507,13 +1539,49 @@ poll();
 """
 
 
+def ensure_cert():
+    """Самоподписанный сертификат на адреса из ALLOWED_HOSTS (openssl есть в Ubuntu из коробки)."""
+    names = sorted({host.rsplit(":", 1)[0] for host in ALLOWED_HOSTS})
+    san = ",".join(f"{'IP' if is_ip(name) else 'DNS'}:{name}" for name in names)
+    try:
+        with open(WEB_CERT + ".san") as f:
+            if f.read() == san and os.path.exists(WEB_KEY):
+                return
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(WEB_CERT), exist_ok=True)
+    old = os.umask(0o077)  # ключ — только владельцу
+    try:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                        "-nodes", "-days", "3650", "-subj", "/CN=lan-vpn-proxy", "-addext", f"subjectAltName={san}",
+                        "-keyout", WEB_KEY, "-out", WEB_CERT], check=True, capture_output=True)
+        with open(WEB_CERT + ".san", "w") as f:
+            f.write(san)
+    finally:
+        os.umask(old)
+    print(f"создан сертификат веб-интерфейса: {san}", flush=True)
+
+
+def is_ip(name):
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
 def main():
     threading.Thread(target=collect_forever, daemon=True).start()
     threading.Thread(target=SOCKETS.run_forever, daemon=True).start()
     if WEB_BIND not in ("127.0.0.1", "localhost", "::1") and not WEB_PASSWORD:
         sys.exit(f"WEB_BIND={WEB_BIND} без WEB_PASSWORD: страницу без пароля откроет любой в сети")
     server = ThreadingHTTPServer((WEB_BIND, WEB_PORT), Handler)
-    print(f"веб-интерфейс: http://{WEB_BIND}:{WEB_PORT}", flush=True)
+    if WEB_TLS:
+        ensure_cert()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(WEB_CERT, WEB_KEY)
+        server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+    print(f"веб-интерфейс: {'https' if WEB_TLS else 'http'}://{WEB_BIND}:{WEB_PORT}", flush=True)
     server.serve_forever()
 
 
