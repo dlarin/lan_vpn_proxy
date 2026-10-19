@@ -160,7 +160,7 @@
   <dt>Сервер</dt><dd><span id="server">—</span> <a href="#servers">сменить</a></dd>
   <dt>Через VPN</dt><dd><span id="routing">—</span> <a href="#rules">изменить</a></dd>
   <dt>Контейнер</dt><dd id="container">—</dd>
-  <dt>Прокси GNOME</dt><dd id="proxy">—</dd>
+  <dt id="proxy-label">Прокси GNOME</dt><dd id="proxy">—</dd>
   <dt>Внешний IP</dt><dd><span id="ip"></span> <button id="check">Проверить</button></dd>
 </dl>
 </div>
@@ -215,6 +215,9 @@
 приложения и хосты ниже, остальное напрямую</span></label>
 <h3>Приложения</h3>
 <textarea id="rules-apps" rows="4" spellcheck="false"></textarea>
+<p id="rules-apps-gateway" class="note warn" style="margin: 8px 0 0" hidden>Это шлюз для устройств сети: Xray видит только
+IP-адрес устройства, а не программу на нём, поэтому правила по приложениям здесь не действуют.
+Чтобы приложение шло через VPN, добавьте его домены и сети в «Хосты».</p>
 <p class="foot">По одному в строке: имя исполняемого файла (как на вкладке «Хосты»), полный путь
 или папка с / на конце. Через VPN пойдут все подключения этого приложения.</p>
 <h3>Хосты</h3>
@@ -416,11 +419,19 @@ function render(s) {
     proxy = 'включён, 127.0.0.1:' + s.proxy_port;
     if (String(s.proxy_port) !== String(s.http_port)) proxy += ' — это не наш прокси (Happ?)';
   }
+  if (s.routing.gateway) {
+    // Шлюз: устройства сети заворачивает в Xray служба lan-vpn-proxy-gateway, пока контейнер запущен.
+    proxy = !s.watcher ? 'служба lan-vpn-proxy-gateway не запущена — устройства ходят напрямую'
+      : s.running ? 'включён — устройства сети идут через Xray' : 'выключен — устройства ходят напрямую';
+  }
+  $('proxy-label').textContent = s.routing.gateway ? 'VPN для сети' : 'Прокси GNOME';
   $('proxy').textContent = proxy;
   let hint = '';
   if (!s.config) hint = 'Нет xray/config.json: заполните SUBSCRIPTION в .env и запустите ./gen_config.py';
   else if (s.restarting) hint = 'Xray падает при запуске — смотрите docker compose logs';
-  else if (!s.watcher) hint = 'Служба lan-vpn-proxy-watch не запущена: системный прокси GNOME не будет переключаться';
+  else if (!s.watcher) hint = s.routing.gateway
+    ? 'Служба lan-vpn-proxy-gateway не запущена: устройства сети ходят напрямую — sudo ./install-gateway.sh'
+    : 'Служба lan-vpn-proxy-watch не запущена: системный прокси GNOME не будет переключаться';
   note('hint', hint);
   renderCisco(s.cisco);
   renderTraffic(s.traffic);
@@ -582,6 +593,7 @@ async function loadRules() {
   const r = await (await fetch('/api/rules')).json();
   for (const input of document.querySelectorAll('input[name=mode]')) input.checked = input.value === r.mode;
   $('rules-apps').value = r.apps.join('\n');
+  $('rules-apps-gateway').hidden = !r.gateway;
   $('rules-hosts').value = r.hosts.join('\n');
   $('rules-direct').value = r.direct.join('\n');
 }

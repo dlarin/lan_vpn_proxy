@@ -241,6 +241,18 @@ sudo ./install-gateway.sh
 - `gen_config.py` или `docker-compose.yml` — `./gen_config.py && docker compose up -d --force-recreate`;
 - `web.py` или `static/` — `systemctl --user restart lan-vpn-proxy-web.service`.
 
+### Резервная копия
+
+`.env` (подписка, пароль) и `data/` (имена устройств, статистика, сертификат) есть только на сервере. Код восстанавливается из git, а эти файлы — нет. Их забирает на ноутбук `backup-green.sh`:
+
+```bash
+./backup-green.sh                       # вручную; архив — в ~/backups/lan_vpn_proxy, права 600
+systemctl --user link ~/projects/lan_vpn_proxy/lan-vpn-proxy-backup.{service,timer}
+systemctl --user enable --now lan-vpn-proxy-backup.timer   # раз в день
+```
+
+Хранятся последние 14 архивов (`KEEP`). Если сервер недоступен (ноутбук не дома), скрипт ничего не делает. Ключ хоста SSH проверяется, поэтому в чужой сети с тем же адресом подключения не будет. Восстановить: скопировать файлы проекта на сервер, распаковать в его папку архив (`tar -xzf green-….tar.gz -C ~/lan_vpn_proxy`) и запустить `sudo ./install-gateway.sh`.
+
 Правила по приложениям (`VPN_APPS`) на шлюзе не работают: Xray не видит процессов (`gateway/compose.yml`). Если сервер выключен, интернет пропадает у всей сети: верните шлюзом роутер в его настройках DHCP.
 
 ## Тесты

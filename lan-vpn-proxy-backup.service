@@ -1,0 +1,6 @@
+[Unit]
+Description=lan-vpn-proxy: резервная копия настроек домашнего сервера (.env и data/)
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/lan_vpn_proxy/backup-green.sh

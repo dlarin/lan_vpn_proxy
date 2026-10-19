@@ -35,6 +35,7 @@ from gen_config import (DEFAULT_OUTPUT, ENV_FILE, HEALTH_PORT, OUTBOUNDS_FILE, P
 
 CONTAINER = "lan-vpn-proxy"
 WATCH_SERVICE = "lan-vpn-proxy-watch.service"
+GATEWAY_SERVICE = "lan-vpn-proxy-gateway.service"  # шлюз: системная служба, правила nftables для сети
 IP_URL = "https://ifconfig.me/ip"
 SAMPLE_INTERVAL = 60  # секунд между замерами трафика и чтением журнала Xray
 TRAFFIC_FILE = os.path.join(PROJECT_DIR, "data", "traffic.json")
@@ -582,7 +583,9 @@ def select_server(index):
 
 
 def rules_info():
-    return config_settings(load_env(ENV_FILE))["routing"]
+    settings = config_settings(load_env(ENV_FILE))
+    # Шлюз (TPROXY_PORT): трафик приходит с других устройств, их программ Xray не видит.
+    return {**settings["routing"], "gateway": settings["tproxy_port"] > 0}
 
 
 def save_rules(body):
@@ -803,7 +806,10 @@ AUTO = AutoSwitch()
 def status():
     _, mode, _ = run("gsettings", "get", "org.gnome.system.proxy", "mode", timeout=5)
     _, port, _ = run("gsettings", "get", "org.gnome.system.proxy.http", "port", timeout=5)
-    _, watcher, _ = run("systemctl", "--user", "is-active", WATCH_SERVICE, timeout=5)
+    routing = rules_info()
+    # На шлюзе GNOME нет — вместо наблюдателя за прокси важна служба, которая включает VPN для сети.
+    _, watcher, _ = run("systemctl", *([] if routing["gateway"] else ["--user"]), "is-active",
+                        GATEWAY_SERVICE if routing["gateway"] else WATCH_SERVICE, timeout=5)
     servers = load_servers()
     return {
         **container_state(),
@@ -814,7 +820,7 @@ def status():
         "watcher": watcher == "active",
         "traffic": TRAFFIC.summary(),
         "server": servers["servers"][servers["current"]] if servers else None,
-        "routing": rules_info(),
+        "routing": routing,
         "servers_updated": servers["updated"] if servers else None,
         "cisco": CISCO.info(),
         "auto": AUTO.info(),

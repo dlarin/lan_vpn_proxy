@@ -1,0 +1,11 @@
+[Unit]
+Description=lan-vpn-proxy: резервная копия настроек домашнего сервера раз в день
+
+[Timer]
+OnCalendar=daily
+# Ноутбук был выключен в назначенное время — запустить при включении.
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
