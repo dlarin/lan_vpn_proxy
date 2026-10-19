@@ -18,4 +18,12 @@ table inet vpn {
 		th dport 53 return
 		meta l4proto { tcp, udp } meta mark set 1 tproxy ip to 127.0.0.1:@PORT@ accept
 	}
+
+	# Xray слушает @PORT@ на всех адресах (так нужно TPROXY). Прямые подключения к нему извне
+	# закрываем: пакеты TPROXY приходят с меткой 1, всё остальное на этот порт — отбрасываем.
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "lo" return
+		meta l4proto { tcp, udp } th dport @PORT@ meta mark != 1 drop
+	}
 }

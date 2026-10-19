@@ -143,13 +143,15 @@ class Routing(unittest.TestCase):
 
     def test_filter_order(self):
         rules = g.routing_rules(ROUTING)
-        tags = [(next(k for k in ("ip", "domain", "process", "network") if k in r), r["outboundTag"]) for r in rules]
-        # локальные сети и «всегда напрямую» — раньше правил VPN; приложения — после хостов; в конце — напрямую
-        self.assertEqual(tags, [("ip", "direct"), ("domain", "direct"), ("domain", "proxy"), ("ip", "proxy"),
+        tags = [(next(k for k in ("inboundTag", "ip", "domain", "process", "network") if k in r), r["outboundTag"])
+                for r in rules]
+        # проверка сервера — всегда через VPN; локальные сети и «всегда напрямую» — раньше правил VPN;
+        # приложения — после хостов; в конце — напрямую
+        self.assertEqual(tags, [("inboundTag", "proxy"), ("ip", "direct"), ("domain", "direct"), ("domain", "proxy"), ("ip", "proxy"),
                                 ("process", "proxy"), ("network", "direct")])
 
     def test_all_mode_has_no_catch_all_direct(self):
-        rules = g.routing_rules(dict(ROUTING, mode="all"))
+        rules = g.routing_rules(dict(ROUTING, mode="all"))[1:]  # без правила проверки сервера
         self.assertTrue(all(r["outboundTag"] == "direct" for r in rules))
         self.assertFalse(any("network" in r for r in rules))
 
@@ -161,7 +163,8 @@ class BuildConfig(unittest.TestCase):
 
     def test_inbounds_and_direct_outbound(self):
         cfg = self.config()
-        self.assertEqual([(i["tag"], i["port"]) for i in cfg["inbounds"]], [("socks", 1080), ("http", 3128)])
+        self.assertEqual([(i["tag"], i["listen"], i["port"]) for i in cfg["inbounds"]],
+                         [("socks", "127.0.0.1", 1080), ("http", "127.0.0.1", 3128), ("health", "127.0.0.1", g.HEALTH_PORT)])
         self.assertEqual([o["tag"] for o in cfg["outbounds"]], ["proxy", "direct"])
 
     def test_tproxy_inbound(self):

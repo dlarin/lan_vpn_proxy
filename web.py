@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.etree import ElementTree
 
-from gen_config import (DEFAULT_OUTPUT, ENV_FILE, OUTBOUNDS_FILE, PROJECT_DIR, SERVERS_FILE, STATS_API,
+from gen_config import (DEFAULT_OUTPUT, ENV_FILE, HEALTH_PORT, OUTBOUNDS_FILE, PROJECT_DIR, SERVERS_FILE, STATS_API,
                         build_check_config, build_config, config_settings, load_env, set_env_value, setting,
                         split_list, write_json)
 
@@ -98,6 +98,13 @@ ALLOWED_HOSTS = {f"{host}:{WEB_PORT}" for host in ["127.0.0.1", "localhost", *sp
 ALLOWED_ORIGINS = {f"{'https' if WEB_TLS else 'http'}://{host}" for host in ALLOWED_HOSTS}
 ACTION_LOCK = threading.Lock()
 CHECK_LOCK = threading.Lock()
+# Автопереключение: раз в AUTO_INTERVAL секунд запрос через текущий сервер; AUTO_FAILS неудач подряд —
+# проверка всех серверов и переход на самый быстрый рабочий. SUBSCRIPTION_REFRESH — раз во сколько часов
+# обновлять подписку (0 — не обновлять); работающий VPN при этом не перезапускается.
+AUTO_SWITCH = setting(dotenv, "AUTO_SWITCH", "off") == "on"
+SUBSCRIPTION_REFRESH = float(setting(dotenv, "SUBSCRIPTION_REFRESH", "0"))
+AUTO_INTERVAL = 120
+AUTO_FAILS = 3
 # Результат последней проверки: задержка в мс по названию сервера, None — не работает.
 last_check = {"time": None, "delays": {}}
 
@@ -137,7 +144,7 @@ def read_vpn_bytes():
     totals = collections.Counter()
     for stat in json.loads(out).get("stat", []):
         kind, tag, _, direction = stat["name"].split(">>>")
-        if kind == "inbound" or (kind == "outbound" and tag == "direct"):
+        if (kind == "inbound" and tag != "health") or (kind == "outbound" and tag == "direct"):
             # Нулевые значения Xray не выводит вовсе.
             totals[kind, direction] += int(stat.get("value", 0))
     return (max(totals["inbound", "uplink"] - totals["outbound", "uplink"], 0),
@@ -616,6 +623,101 @@ def check_servers():
         CHECK_LOCK.release()
 
 
+class AutoSwitch:
+    """Автопереключение на рабочий сервер и обновление подписки по расписанию (AUTO_SWITCH, SUBSCRIPTION_REFRESH)."""
+
+    def __init__(self):
+        self.fails = 0
+        self.probe = None  # {"time", "delay"} последней проверки текущего сервера
+        self.event = None  # {"time", "text"} последнего переключения или неудачи
+        self.refreshed = None
+
+    def info(self):
+        return {"enabled": AUTO_SWITCH, "refresh_hours": SUBSCRIPTION_REFRESH, "probe": self.probe,
+                "fails": self.fails, "event": self.event, "refreshed": self.refreshed}
+
+    def note(self, text):
+        self.event = {"time": now_minutes(), "text": text}
+        print(f"автопереключение: {text}", flush=True)
+
+    def run_forever(self):
+        next_refresh = time.monotonic() + SUBSCRIPTION_REFRESH * 3600
+        while True:
+            time.sleep(AUTO_INTERVAL)
+            for enabled, job in ((AUTO_SWITCH, self.check),
+                                 (SUBSCRIPTION_REFRESH and time.monotonic() >= next_refresh, self.refresh)):
+                if not enabled:
+                    continue
+                try:
+                    job()
+                except Exception as e:  # сбой не должен останавливать задачу и веб-интерфейс
+                    print(f"{job.__qualname__}: {e}", flush=True)
+            if SUBSCRIPTION_REFRESH and time.monotonic() >= next_refresh:
+                next_refresh = time.monotonic() + SUBSCRIPTION_REFRESH * 3600
+
+    def check(self):
+        # VPN выключен — трафик и так напрямую, проверять нечего.
+        if not container_state()["running"]:
+            self.fails = 0
+            return
+        # Конфиг, собранный до появления входа health, проверить нельзя — не считаем это сбоем сервера.
+        try:
+            with open(DEFAULT_OUTPUT, encoding="utf-8") as f:
+                if not any(i.get("tag") == "health" for i in json.load(f).get("inbounds", [])):
+                    return
+        except (OSError, ValueError):
+            return
+        delay = probe(HEALTH_PORT)
+        self.probe = {"time": now_minutes(), "delay": delay}
+        if delay is not None:
+            self.fails = 0
+            return
+        self.fails += 1
+        if self.fails >= AUTO_FAILS:
+            self.switch()
+
+    def switch(self):
+        self.fails = 0  # следующая полная проверка — не раньше чем через AUTO_FAILS неудач
+        info = load_servers()
+        old = info["servers"][info["current"]]["name"] if info else "?"
+        ok, message = check_servers()
+        if not ok:
+            return self.note(f"{old} не отвечает, проверить серверы не вышло: {message}")
+        servers = load_servers()["servers"]
+        delays = [last_check["delays"].get(s["name"]) for s in servers]
+        if delays[info["current"]] is not None:
+            return  # при полной проверке текущий сервер ответил — сбой был временным
+        working = sorted((d, i) for i, d in enumerate(delays) if d is not None)
+        if not working:
+            return self.note(f"{old} не отвечает, рабочих серверов нет — возможно, нет интернета")
+        new = servers[working[0][1]]["name"]
+        ok, message = select_server(working[0][1])
+        self.note(f"переключён с {old} на {new}: {old} не отвечал" if ok else f"переключиться на {new} не вышло: {message}")
+
+    def refresh(self):
+        """Свежий список серверов и ключи. Рабочий конфиг не трогаем: смена адреса у провайдера
+        (rucash/rucash2) иначе перезапускала бы VPN каждый раз; если текущий сервер умрёт,
+        check переключит на сервер уже из свежего списка."""
+        tmp = tempfile.mkdtemp(prefix="lvp-refresh-")
+        try:
+            with ACTION_LOCK:
+                ok, _, err = run(sys.executable, os.path.join(PROJECT_DIR, "gen_config.py"),
+                                 "-o", os.path.join(tmp, "config.json"), timeout=90)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if ok:
+            self.refreshed = now_minutes()
+        else:
+            self.note(f"обновить подписку не вышло: {err[-200:]}")
+
+
+def now_minutes():
+    return datetime.datetime.now().isoformat(timespec="minutes")
+
+
+AUTO = AutoSwitch()
+
+
 def status():
     _, mode, _ = run("gsettings", "get", "org.gnome.system.proxy", "mode", timeout=5)
     _, port, _ = run("gsettings", "get", "org.gnome.system.proxy.http", "port", timeout=5)
@@ -633,6 +735,7 @@ def status():
         "routing": rules_info(),
         "servers_updated": servers["updated"] if servers else None,
         "cisco": CISCO.info(),
+        "auto": AUTO.info(),
     }
 
 
@@ -990,6 +1093,7 @@ def is_ip(name):
 def main():
     threading.Thread(target=collect_forever, daemon=True).start()
     threading.Thread(target=SOCKETS.run_forever, daemon=True).start()
+    threading.Thread(target=AUTO.run_forever, daemon=True).start()
     if WEB_BIND not in ("127.0.0.1", "localhost", "::1") and not WEB_PASSWORD:
         sys.exit(f"WEB_BIND={WEB_BIND} без WEB_PASSWORD: страницу без пароля откроет любой в сети")
     server = ThreadingHTTPServer((WEB_BIND, WEB_PORT), Handler)

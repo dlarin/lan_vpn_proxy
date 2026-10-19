@@ -196,6 +196,7 @@
 <div class="card-head"><h2>Серверы</h2>
   <span class="extra"><button id="update">Обновить подписку</button> <button id="test" class="primary">Проверить серверы</button></span></div>
 <p id="servers-msg" class="note" hidden></p>
+<p id="auto" class="foot"></p>
 <table>
   <thead><tr><th>№</th><th>Сервер</th><th>Подключение</th><th>Задержка</th><th></th></tr></thead>
   <tbody id="servers"></tbody>
@@ -373,6 +374,23 @@ async function serverAction(action, button, label, body) {
   button.textContent = text;
 }
 
+function renderAuto(a) {
+  const when = t => new Date(t).toLocaleString('ru', {dateStyle: 'short', timeStyle: 'short'});
+  const parts = [];
+  if (a.enabled) {
+    let text = 'Автопереключение включено: каждые 2 минуты запрос через текущий сервер, после 3 неудач подряд — переход на самый быстрый рабочий.';
+    if (a.probe) text += ' Последняя проверка ' + when(a.probe.time) + ': ' +
+      (a.probe.delay === null ? 'не ответил (неудач подряд: ' + a.fails + ')' : a.probe.delay + ' мс') + '.';
+    parts.push(text);
+  } else {
+    parts.push('Автопереключение выключено (AUTO_SWITCH=on в .env).');
+  }
+  if (a.refresh_hours) parts.push('Подписка обновляется раз в ' + a.refresh_hours + ' ч' +
+    (a.refreshed ? ', последний раз ' + when(a.refreshed) : '') + '.');
+  if (a.event) parts.push(when(a.event.time) + ' — ' + a.event.text + '.');
+  $('auto').textContent = parts.join(' ');
+}
+
 function render(s) {
   last = s;
   const active = s.running || s.restarting;
@@ -388,6 +406,7 @@ function render(s) {
   $('routing').textContent = s.routing.mode === 'filter'
     ? 'по списку: приложений ' + s.routing.apps.length + ', хостов ' + s.routing.hosts.length + ', остальное напрямую'
     : 'всё, что идёт через прокси' + (s.routing.direct.length ? ', кроме «всегда напрямую»: ' + s.routing.direct.length : '');
+  renderAuto(s.auto);
   // Список перечитываем, только когда gen_config.py собрал новый конфиг.
   const key = s.servers_updated + '|' + (s.server && s.server.name);
   if (key !== serversKey) { serversKey = key; loadServers(); }

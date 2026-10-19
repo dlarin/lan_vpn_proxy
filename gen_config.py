@@ -33,6 +33,9 @@ PRIVATE_NETS = [
 ]
 # API статистики; web.py читает его через docker exec.
 STATS_API = "127.0.0.1:10085"
+# Проверка сервера для автопереключения (web.py): HTTP-прокси, который всегда идёт через VPN,
+# в каком бы режиме ни были правила. Слушает только 127.0.0.1.
+HEALTH_PORT = 10086
 
 
 def load_env(path):
@@ -319,7 +322,8 @@ def read_source(source, user_agent):
 def routing_rules(routing):
     """Локальные сети и DIRECT_HOSTS — всегда напрямую. Режим all: остальное через VPN (первый outbound).
     Режим filter: через VPN только приложения и хосты из списков, остальное напрямую."""
-    rules = [{"type": "field", "ip": PRIVATE_NETS, "outboundTag": "direct"}]
+    rules = [{"type": "field", "inboundTag": ["health"], "outboundTag": "proxy"},
+             {"type": "field", "ip": PRIVATE_NETS, "outboundTag": "direct"}]
     # Раньше правил VPN: правило, совпавшее первым, и решает. Так рабочие сайты идут через Cisco,
     # даже если их открывает приложение из VPN_APPS.
     domains, networks = host_rules(routing["direct"])
@@ -351,6 +355,7 @@ def build_config(server, listen, socks_port, http_port, routing, tproxy_port=0):
          "settings": {"auth": "noauth", "udp": False}, "sniffing": sniffing},
         {"tag": "http", "listen": listen, "port": http_port, "protocol": "http",
          "settings": {}, "sniffing": sniffing},
+        {"tag": "health", "listen": "127.0.0.1", "port": HEALTH_PORT, "protocol": "http", "settings": {}},
     ]
     if tproxy_port:
         # Прозрачный прокси для устройств, у которых этот компьютер — шлюз: nftables заворачивает
