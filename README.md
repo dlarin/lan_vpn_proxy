@@ -204,7 +204,7 @@ xdg-open http://127.0.0.1:8765
 Установка на сервере:
 
 ```bash
-git clone … ~/lan_vpn_proxy && cd ~/lan_vpn_proxy   # или пуш с ноутбука, см. ниже
+scp -r … ~/lan_vpn_proxy && cd ~/lan_vpn_proxy        # файлы проекта
 cp .env.example .env && chmod 600 .env               # SUBSCRIPTION, TPROXY_PORT=12345, PUID=0, PGID=0,
                                                      # WEB_BIND=0.0.0.0, WEB_HOSTS, WEB_PASSWORD
 sudo ./install-gateway.sh
@@ -214,29 +214,19 @@ sudo ./install-gateway.sh
 - кладёт правила nftables (таблица `inet vpn`) из шаблона `gateway/tproxy.nft.in` в `/etc/lan-vpn-proxy/tproxy.nft`. Интерфейс и сеть устройств берёт из маршрута по умолчанию, их можно задать в `.env`: `GATEWAY_IFACE`, `GATEWAY_LAN`;
 - включает `ip_forward` и выключает `send_redirects` (`/etc/sysctl.d/90-lan-vpn-proxy.conf`): устройства и роутер в одной сети, без этого сервер отсылал бы устройства напрямую к роутеру;
 - ставит системную службу `lan-vpn-proxy-gateway.service` (`gateway-watch.sh` → `/usr/local/sbin/lan-vpn-proxy-gateway`). Она добавляет маршрут `fwmark 1 → table 100` и держит таблицу `inet vpn`, только пока запущен контейнер: остановили его — устройства ходят напрямую;
-- ставит пользовательскую службу веб-интерфейса и включает linger, собирает конфиг Xray (только если его ещё нет) и запускает контейнер;
-- подключает хук для обновления пушем.
+- ставит пользовательскую службу веб-интерфейса и включает linger, собирает конфиг Xray (только если его ещё нет) и запускает контейнер.
 
 Что настроить вручную:
 - адрес сервера — статический, шлюз — роутер: по DHCP сервер получил бы шлюзом самого себя и остался бы без интернета;
 - политика `FORWARD` — `accept`, иначе у устройств пропадёт всё, кроме TCP и UDP;
 - в DHCP роутера шлюзом указать сервер.
 
-### Обновление с ноутбука
+### Обновление
 
-На сервере нет доступа к приватному репозиторию, поэтому код пушится прямо на него:
-
-```bash
-git remote add green dima@192.168.0.2:lan_vpn_proxy   # один раз
-git push green
-```
-
-Пуш сразу обновляет файлы на сервере (`receive.denyCurrentBranch=updateInstead`). Затем хук `gateway/post-receive` перезапускает то, что затронули изменения:
-- файлы шлюза и служб — `sudo ./install-gateway.sh`;
-- `gen_config.py` или `docker-compose.yml` — пересобирает конфиг и пересоздаёт контейнер;
-- `web.py` — перезапускает веб-интерфейс.
-
-`.env`, `data/` и `xray/` в git не входят, и пуш их не трогает. Если на сервере правили файлы из git, пуш откажет — сначала уберите правки там.
+Скопируйте изменённые файлы на сервер (`scp`) и перезапустите то, что они затрагивают:
+- файлы шлюза и служб (`install-gateway.sh`, `gateway-watch.sh`, `gateway/`, `*.service`) — `sudo ./install-gateway.sh`;
+- `gen_config.py` или `docker-compose.yml` — `./gen_config.py && docker compose up -d --force-recreate`;
+- `web.py` — `systemctl --user restart lan-vpn-proxy-web.service`.
 
 Правила по приложениям (`VPN_APPS`) для чужих устройств не работают — Xray видит только процессы сервера. Если сервер выключен, интернет пропадает у всей сети: верните шлюзом роутер в его настройках DHCP.
 

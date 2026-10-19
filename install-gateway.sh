@@ -86,9 +86,4 @@ cd "$DIR"
 [ -f xray/config.json ] || as_user ./gen_config.py
 as_user docker compose up -d
 
-# Обновление пушем с ноутбука: git push green
-if [ -d "$DIR/.git" ]; then
-    as_user git -C "$DIR" config receive.denyCurrentBranch updateInstead
-    as_user ln -sfn ../../gateway/post-receive "$DIR/.git/hooks/post-receive"
-fi
 echo "готово"
