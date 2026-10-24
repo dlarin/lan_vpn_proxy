@@ -5,6 +5,7 @@
 """
 import base64
 import http.client
+import io
 import json
 import os
 import sys
@@ -173,6 +174,26 @@ class SaveRules(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.env, {})
         web.restart_if_running.assert_not_called()
+
+
+class RulesCli(unittest.TestCase):
+    """`web.py rules` и `web.py rules-set` — их вызывает sync-rules.py."""
+
+    def test_rules_set_passes_time_and_exit_code(self):
+        body = {"mode": "all", "apps": [], "hosts": [], "direct": [], "updated": 1700000000}
+        for ok, code in ((True, 0), (False, 1)):
+            with self.subTest(ok=ok), mock.patch.object(web, "save_rules", return_value=(ok, "сообщение")) as save, \
+                    mock.patch.object(web.sys, "stdin", io.StringIO(json.dumps(body))), \
+                    mock.patch("builtins.print"), self.assertRaises(SystemExit) as exit_:
+                web.rules_cli(["rules-set"])
+            save.assert_called_once_with(body, 1700000000)
+            self.assertEqual(exit_.exception.code, code)
+
+    def test_rules_prints_json(self):
+        with mock.patch.object(web, "rules_info", return_value={"mode": "all", "updated": 5}), \
+                mock.patch("builtins.print") as out:
+            web.rules_cli(["rules"])
+        self.assertEqual(json.loads(out.call_args.args[0]), {"mode": "all", "updated": 5})
 
 
 class ActionLockTest(unittest.TestCase):

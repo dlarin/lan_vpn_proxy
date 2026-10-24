@@ -36,6 +36,13 @@ class Describe(unittest.TestCase):
         gateway = status(proxy_mode="none", routing={"mode": "all", "gateway": True})
         self.assertEqual(tray.describe("green", gateway, "")[1], "on")
 
+    def test_auto_switch_probe(self):
+        probe = lambda delay, fails=0: "\n".join(tray.describe("green", status(auto={  # noqa: E731
+            "enabled": True, "fails": fails, "probe": {"time": "2026-10-24T23:10", "delay": delay}}), "")[0])
+        self.assertIn("проверка сервера 23:10: 180 мс", probe(180))
+        self.assertIn("23:10: не ответил (2 подряд)", probe(None, 2))
+        self.assertNotIn("проверка", "\n".join(tray.describe("Ноутбук", status(), "")[0]))  # выключено
+
     def test_stopped_service_warns(self):
         self.assertEqual(tray.describe("Ноутбук", status(running=False, watcher=False), "")[1], "warn")
 

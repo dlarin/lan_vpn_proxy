@@ -104,7 +104,14 @@ def describe(name, status, unreachable):
     today = (status.get("traffic") or [None])[0]
     if today:
         lines.append(f"    сегодня через VPN: ↓ {size(today['vpn_down'])}  ↑ {size(today['vpn_up'])}")
-    event = (status.get("auto") or {}).get("event")
+    auto = status.get("auto") or {}
+    probe = auto.get("probe")
+    if auto.get("enabled") and probe:
+        # Проверка раз в 2 минуты: старое время значит, что автопереключение не работает.
+        result = "не ответил" + (f" ({auto.get('fails')} подряд)" if auto.get("fails") else "") \
+            if probe.get("delay") is None else f"{probe['delay']} мс"
+        lines.append(f"    проверка сервера {probe['time'][11:16]}: {result}")
+    event = auto.get("event")
     if event:
         lines.append(f"    автопереключение {event['time']}: {event['text']}")
     xray = status.get("xray") or {}
@@ -124,6 +131,8 @@ class Tray:
         self.green_url, self.green_password = setting(load_env(ENV_FILE), "GREEN_URL", "https://192.168.0.2:8765"), ""
         self.icon, self.tooltip = ICONS["off"], "lan-vpn-proxy"
         self.lines = ["загрузка…"]
+        self.laptop_running = None  # None — веб-интерфейс ноутбука не ответил, кнопки нет
+        self.error = ""  # ошибка последнего включения/выключения — в меню до следующего удачного
         self.revision = 1
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
         self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
@@ -160,7 +169,10 @@ class Tray:
             green_note = "недоступен (не дома?)"
         else:
             green_note = "нет GREEN_PASSWORD или data/green-web.crt"
+        self.laptop_running = None if laptop is None else bool(laptop.get("running") or laptop.get("restarting"))
         laptop_lines, laptop_state = describe("Ноутбук", laptop, "веб-интерфейс не отвечает")
+        if self.error:
+            laptop_lines.append("    " + self.error)
         green_lines, green_state = describe("green", green, green_note)
         if "warn" in (laptop_state, green_state) or laptop_state is None:
             state = "warn"
@@ -216,6 +228,9 @@ class Tray:
                 items.append((100 + i, {"label": GLib.Variant("s", line.replace("_", "__")),
                                         "enabled": GLib.Variant("b", False)}))
         items.append((1, {"type": GLib.Variant("s", "separator")}))
+        if self.laptop_running is not None:
+            items.append((6, {"label": GLib.Variant("s", "Выключить VPN ноутбука" if self.laptop_running
+                                                         else "Включить VPN ноутбука")}))
         items.append((2, {"label": GLib.Variant("s", "Открыть ноутбук — " + LAPTOP_URL)}))
         items.append((3, {"label": GLib.Variant("s", "Открыть green — " + self.green_url)}))
         items.append((4, {"label": GLib.Variant("s", "Обновить")}))
@@ -267,6 +282,21 @@ class Tray:
             self.refresh()
         elif item_id == 5:
             LOOP.quit()
+        elif item_id == 6 and self.laptop_running is not None:
+            threading.Thread(target=self.toggle, args=("off" if self.laptop_running else "on",), daemon=True).start()
+
+    def toggle(self, action):
+        """Та же кнопка, что на странице: POST /api/on|off. Origin — свой, иначе web.py откажет."""
+        request = urllib.request.Request(f"{LAPTOP_URL}/api/{action}", data=b"{}", method="POST", headers={
+            "Content-Type": "application/json", "Origin": LAPTOP_URL})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=60) as response:
+                result = json.load(response)
+            self.error = "" if result.get("ok") else "не вышло: " + (result.get("message") or "ошибка")[:120]
+        except (OSError, ValueError) as e:
+            self.error = f"не вышло: {e}"[:120]
+        self.poll()
 
     @staticmethod
     def open(url):
