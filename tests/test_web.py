@@ -135,9 +135,18 @@ class SaveRules(unittest.TestCase):
     def test_saves_lists_to_env(self):
         ok, message = self.save(hosts=[" youtube.com ", "t.me", "youtube.com", ""], direct=["work.ru"])
         self.assertTrue(ok, message)
+        updated = self.env.pop("RULES_UPDATED")
         self.assertEqual(self.env, {"ROUTING_MODE": "filter", "VPN_APPS": "", "VPN_HOSTS": "youtube.com, t.me",
                                     "DIRECT_HOSTS": "work.ru"})
+        self.assertAlmostEqual(int(updated), web.time.time(), delta=5)
         self.assertIn("перезапущен", message)
+
+    def test_keeps_given_update_time(self):
+        # sync-rules.py переносит правила с другой машины вместе с их временем.
+        web.save_rules({"mode": "all", "apps": [], "hosts": [], "direct": []}, 1700000000)
+        self.assertEqual(self.env["RULES_UPDATED"], "1700000000")
+        web.save_rules({"mode": "all", "apps": [], "hosts": [], "direct": []}, "мусор")
+        self.assertNotEqual(self.env["RULES_UPDATED"], "1700000000")
 
     def test_rejects_bad_input(self):
         for kwargs in ({"mode": "nope"}, {"hosts": ["a.com, b.com"]}, {"hosts": ["a b"]}, {"direct": ["x'y"]},

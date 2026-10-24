@@ -1,0 +1,9 @@
+[Unit]
+Description=lan-vpn-proxy: синхронизация правил с домашним сервером раз в 15 минут
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

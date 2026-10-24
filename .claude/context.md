@@ -6,7 +6,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 Заменить VPN-клиент Happ на ноутбуке (Ubuntu, GNOME) на Xray в Docker. Правило пользователя: **контейнер запущен — трафик через VPN, остановлен — напрямую.** Плюс управление рабочим VPN Cisco Secure Client из того же веб-интерфейса. Второй вариант установки — домашний сервер (Debian) как шлюз с VPN для всех устройств сети. Подробности и команды — в `README.md`.
 
 ## Текущее состояние
-- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`, 45: gen_config, web, auto, shellcheck в Docker), резервная копия — `backup-green.sh` + `lan-vpn-proxy-backup.{service,timer}`, `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
+- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`, 49: gen_config, web, auto, sync_rules, shellcheck в Docker), резервная копия — `backup-green.sh` + `lan-vpn-proxy-backup.{service,timer}`, `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
 - Git: всё закоммичено и запушено в приватный `dlarin/lan_vpn_proxy` (`origin`, SSH, ветка `master`).
 - Работает (проверено 2026-10-12):
   - подписка задана в `.env`, `SERVER` пустой (первый сервер), `ROUTING_MODE=filter`, `DIRECT_HOSTS` задан;
@@ -26,16 +26,16 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
   - проект — `~/lan_vpn_proxy`, **без git**: обновлять `scp` и перезапуском по README, «Шлюз → Обновление»; установка — `sudo ./install-gateway.sh` (повторяемый); доступа к GitHub у `green` нет;
   - на 2026-10-19 файлы совпадают с `bf42345`; в `.env`: `TPROXY_PORT=12345`, `PUID=0`, `WEB_BIND=0.0.0.0`, `WEB_HOSTS=192.168.0.2`, `AUTO_SWITCH=on`, `SUBSCRIPTION_REFRESH=24`, `COMPOSE_FILE=docker-compose.yml:gateway/compose.yml`;
   - TPROXY: таблица `inet vpn` из `/etc/lan-vpn-proxy/tproxy.nft` (шаблон `gateway/tproxy.nft.in`) есть, только пока контейнер запущен (`gateway-watch.sh`); маршрут `fwmark 1 → table 100` ставит служба шлюза; прямые подключения к порту 12345 закрыты;
-  - веб-интерфейс `https://192.168.0.2:8765` (самоподписанный сертификат, пароль, блокировка после 5 неверных за 15 мин);
+  - веб-интерфейс `https://192.168.0.2:8765` (самоподписанный сертификат, пароль, блокировка после 5 неверных за 15 мин); вход из браузера пользователь проверил 2026-10-24;
   - чужое, не трогать: таблица `inet gw` в `/etc/nftables.conf` (DNS на AdGuard, forward), контейнеры `jarvis-*`, `loop`; копия старого `/etc/network/interfaces.d/wired` — `/root/wired.bak`.
 - Автопереключение серверов (`AUTO_SWITCH`, `SUBSCRIPTION_REFRESH`; класс `AutoSwitch` в `web.py`, вход Xray `health` на `127.0.0.1:10086`). Включено на `green`; на ноутбуке выключено, а в его рабочем конфиге ещё нет входа `health` (появится после «Обновить подписку» или выбора сервера). Реальное переключение ещё не случалось.
 - Устройства сети на вкладке «Хосты» различаются по MAC (из `ip neigh` на шлюзе), имя задаётся кнопкой «Переименовать» и хранится в `data/devices.json`; старые записи по IP подписываются именем устройства с тем же адресом.
 - Резервная копия `.env` и `data/` с `green` — `backup-green.sh` на ноутбуке, таймер `lan-vpn-proxy-backup.timer` (раз в день, включён 2026-10-19) → `~/backups/lan_vpn_proxy`, последние 14.
+- Синхронизация правил ноутбук ↔ `green` (с 2026-10-24): `sync-rules.py` на ноутбуке, таймер `lan-vpn-proxy-rules-sync.timer` раз в 15 мин (включён). Побеждают правила, сохранённые позже (`RULES_UPDATED` в `.env`, пишет `save_rules`); применяет через `web.py rules-set` (как кнопка, с проверкой конфига и перезапуском). Время одинаковое — нужен `--from laptop|green`. Первый перенос — с `green` на ноутбук. На `green` выложен новый `web.py`.
 - Режим шлюза в интерфейсе (`TPROXY_PORT` > 0, флаг `routing.gateway`): под «Приложениями» — пояснение, что правила по приложениям не действуют; на главной вместо «Прокси GNOME» — «VPN для сети», проверяется системная служба `lan-vpn-proxy-gateway`, а не `lan-vpn-proxy-watch`.
 - Данные веб-интерфейса — в `data/`: `servers.json`, `outbounds.json` (с ключами, 600), `traffic.json`, `hosts.json` (600).
 
 ## Открытые задачи
-- [ ] Пользователю — подтвердить вход в веб-интерфейс `green` из браузера (`https://192.168.0.2:8765`); проверено только `curl` (401 без пароля).
 - [ ] Дать имена устройствам на вкладке «Хосты» `green` (кнопку «Переименовать» в браузере не проверяли).
 - [ ] Предложено, пользователь пока не выбрал: уведомление о падении `green` (главный риск — без него интернет пропадает у всей сети) и об автопереключении; DNS устройств мимо VPN (учитывать AdGuard); скрипт обновления `green` (если пользователь передумает насчёт ручного `scp`).
 

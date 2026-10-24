@@ -1,0 +1,6 @@
+[Unit]
+Description=lan-vpn-proxy: синхронизация правил с домашним сервером
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/lan_vpn_proxy/sync-rules.py

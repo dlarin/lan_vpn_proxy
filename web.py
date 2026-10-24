@@ -583,12 +583,15 @@ def select_server(index):
 
 
 def rules_info():
-    settings = config_settings(load_env(ENV_FILE))
+    dotenv = load_env(ENV_FILE)
+    settings = config_settings(dotenv)
     # Шлюз (TPROXY_PORT): трафик приходит с других устройств, их программ Xray не видит.
-    return {**settings["routing"], "gateway": settings["tproxy_port"] > 0}
+    return {**settings["routing"], "gateway": settings["tproxy_port"] > 0,
+            "updated": int(setting(dotenv, "RULES_UPDATED", "0") or 0)}
 
 
-def save_rules(body):
+def save_rules(body, updated=None):
+    """updated — время изменения правил (unix): sync-rules.py переносит его с другой машины как есть."""
     if not isinstance(body, dict) or body.get("mode") not in ("all", "filter"):
         return False, "Неверный режим"
     lists = {}
@@ -613,6 +616,8 @@ def save_rules(body):
         set_env_value(ENV_FILE, "VPN_APPS", ", ".join(lists["apps"]))
         set_env_value(ENV_FILE, "VPN_HOSTS", ", ".join(lists["hosts"]))
         set_env_value(ENV_FILE, "DIRECT_HOSTS", ", ".join(lists["direct"]))
+        # По нему sync-rules.py решает, чьи правила новее — ноутбука или green.
+        set_env_value(ENV_FILE, "RULES_UPDATED", str(updated if isinstance(updated, int) and updated > 0 else int(time.time())))
         ok, restarted = restart_if_running()
     if not ok:
         return False, restarted
@@ -1195,5 +1200,19 @@ def main():
     server.serve_forever()
 
 
+def rules_cli(args):
+    """Для sync-rules.py: `web.py rules` — правила в JSON, `web.py rules-set` — применить JSON из stdin."""
+    if args == ["rules"]:
+        print(json.dumps(rules_info(), ensure_ascii=False))
+        return
+    body = json.load(sys.stdin)
+    ok, message = save_rules(body, body.get("updated") if isinstance(body, dict) else None)
+    print(message)
+    sys.exit(0 if ok else 1)
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] in (["rules"], ["rules-set"]):
+        rules_cli(sys.argv[1:])
+    else:
+        main()
