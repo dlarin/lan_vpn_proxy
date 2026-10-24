@@ -695,7 +695,7 @@ def check_servers():
         # ("iptables": false), и в сети bridge у Xray нет ни выхода в интернет, ни проброса портов.
         ok, _, err = run("docker", "run", "-d", "--rm", "--name", CHECK_CONTAINER,
                          "--user", f"{os.getuid()}:{os.getgid()}", "--network", "host",
-                         "-v", f"{tmp}:/usr/local/etc/xray:ro", image)
+                         "-v", f"{tmp}:/config:ro", image, "run", "-c", "/config/config.json")  # как в compose
         if not ok:
             return False, err
         try:

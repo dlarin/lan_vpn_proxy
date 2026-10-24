@@ -1,13 +1,13 @@
 # Контекст проекта
 
-_Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
+_Обновлено: 2026-10-24. Файл ведёт скил `/save-context`._
 
 ## Цель
 Заменить VPN-клиент Happ на ноутбуке (Ubuntu, GNOME) на Xray в Docker. Правило пользователя: **контейнер запущен — трафик через VPN, остановлен — напрямую.** Плюс управление рабочим VPN Cisco Secure Client из того же веб-интерфейса. Второй вариант установки — домашний сервер (Debian) как шлюз с VPN для всех устройств сети. Подробности и команды — в `README.md`.
 
 ## Текущее состояние
-- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, тесты — `tests/` (`python3 -m unittest discover tests`, 53: gen_config, web, auto, sync_rules, tray (только под `/usr/bin/python3`), shellcheck в Docker), резервная копия — `backup-green.sh` + `lan-vpn-proxy-backup.{service,timer}`, `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
-- Git: всё закоммичено и запушено в приватный `dlarin/lan_vpn_proxy` (`origin`, SSH, ветка `master`).
+- Код: `docker-compose.yml`, `gen_config.py`, `proxy-watch.sh` + `lan-vpn-proxy-watch.service`, `web.py` + `lan-vpn-proxy-web.service`, `gateway-watch.sh` + `lan-vpn-proxy-gateway.service` + `install-gateway.sh` + `gateway/` (сервер), страница интерфейса — `static/index.html`, резервная копия — `backup-green.sh` + `lan-vpn-proxy-backup.{service,timer}`, синхронизация правил — `sync-rules.py` + `lan-vpn-proxy-rules-sync.{service,timer}`, значок в трее — `tray.py` + `lan-vpn-proxy-tray.{service,desktop}`, тесты — `tests/` (`python3 -m unittest discover tests`, 53: gen_config, web, auto, sync_rules, tray (только под `/usr/bin/python3`), shellcheck в Docker), `.env.example`, `README.md`. Настройки — в `.env` (права 600, в git не попадает).
+- Git: на 2026-10-24 всё закоммичено (`3c56e81`) и запушено в приватный `dlarin/lan_vpn_proxy` (`origin`, SSH, ветка `master`).
 - Работает (проверено 2026-10-12):
   - подписка задана в `.env`, `SERVER` пустой (первый сервер), `ROUTING_MODE=filter`, `DIRECT_HOSTS` задан;
   - контейнер `lan-vpn-proxy` запущен, обе пользовательские службы включены, прокси GNOME — `manual` на `127.0.0.1:3128`;
@@ -24,15 +24,15 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
   - доступ: `ssh dima@192.168.0.2` по ключу (имя `green` на ноутбуке уходит в рабочий домен — не использовать); `sudo` без пароля; с 2026-10-19 вход по паролю и под root запрещён (`/etc/ssh/sshd_config.d/00-hardening.conf`) — ключ ноутбука единственный путь, кроме консоли;
   - `unattended-upgrades` (с 2026-10-19): только обновления Debian, без автоперезагрузки, репозиторий Docker не обновляет;
   - проект — `~/lan_vpn_proxy`, **без git**: обновлять `scp` и перезапуском по README, «Шлюз → Обновление»; установка — `sudo ./install-gateway.sh` (повторяемый); доступа к GitHub у `green` нет;
-  - на 2026-10-19 файлы совпадают с `bf42345`; в `.env`: `TPROXY_PORT=12345`, `PUID=0`, `WEB_BIND=0.0.0.0`, `WEB_HOSTS=192.168.0.2`, `AUTO_SWITCH=on`, `SUBSCRIPTION_REFRESH=24`, `COMPOSE_FILE=docker-compose.yml:gateway/compose.yml`;
+  - на 2026-10-24 файлы совпадают с репозиторием (выложены `web.py` и `docker-compose.yml` с Xray `26.10.21`); в `.env`: `TPROXY_PORT=12345`, `PUID=0`, `WEB_BIND=0.0.0.0`, `WEB_HOSTS=192.168.0.2`, `AUTO_SWITCH=on`, `SUBSCRIPTION_REFRESH=24`, `COMPOSE_FILE=docker-compose.yml:gateway/compose.yml`;
   - TPROXY: таблица `inet vpn` из `/etc/lan-vpn-proxy/tproxy.nft` (шаблон `gateway/tproxy.nft.in`) есть, только пока контейнер запущен (`gateway-watch.sh`); маршрут `fwmark 1 → table 100` ставит служба шлюза; прямые подключения к порту 12345 закрыты;
   - веб-интерфейс `https://192.168.0.2:8765` (самоподписанный сертификат, пароль, блокировка после 5 неверных за 15 мин); вход из браузера пользователь проверил 2026-10-24;
   - чужое, не трогать: таблица `inet gw` в `/etc/nftables.conf` (DNS на AdGuard, forward), контейнеры `jarvis-*`, `loop`; копия старого `/etc/network/interfaces.d/wired` — `/root/wired.bak`.
-- Автопереключение серверов (`AUTO_SWITCH`, `SUBSCRIPTION_REFRESH`; класс `AutoSwitch` в `web.py`, вход Xray `health` на `127.0.0.1:10086`). Включено на `green`; на ноутбуке выключено, а в его рабочем конфиге ещё нет входа `health` (появится после «Обновить подписку» или выбора сервера). Реальное переключение ещё не случалось.
+- Автопереключение серверов (`AUTO_SWITCH`, `SUBSCRIPTION_REFRESH`; класс `AutoSwitch` в `web.py`, вход Xray `health` на `127.0.0.1:10086`). Включено на `green`; на ноутбуке выключено (вход `health` в конфиге ноутбука уже есть). Реальное переключение ещё не случалось.
 - Устройства сети на вкладке «Хосты» различаются по MAC (из `ip neigh` на шлюзе), имя задаётся кнопкой «Переименовать» и хранится в `data/devices.json`; старые записи по IP подписываются именем устройства с тем же адресом.
 - Резервная копия `.env` и `data/` с `green` — `backup-green.sh` на ноутбуке, таймер `lan-vpn-proxy-backup.timer` (раз в день, включён 2026-10-19) → `~/backups/lan_vpn_proxy`, последние 14.
 - Синхронизация правил ноутбук ↔ `green` (с 2026-10-24): `sync-rules.py` на ноутбуке, таймер `lan-vpn-proxy-rules-sync.timer` раз в 15 мин (включён). Побеждают правила, сохранённые позже (`RULES_UPDATED` в `.env`, пишет `save_rules`); применяет через `web.py rules-set` (как кнопка, с проверкой конфига и перезапуском). Время одинаковое — нужен `--from laptop|green`. Первый перенос — с `green` на ноутбук. На `green` выложен новый `web.py`.
-- Значок в трее (с 2026-10-24): `tray.py` на системном `/usr/bin/python3` (там есть `gi`; в brew-python его нет) — StatusNotifierItem + dbusmenu по D-Bus через Gio, показывает расширение `ubuntu-appindicators`; служба `lan-vpn-proxy-tray.service` (включена). Меню — состояние ноутбука и `green` из `/api/status`, пункты «Открыть». Для `green` — `GREEN_PASSWORD` в `.env` ноутбука (скопирован с `green`) и сертификат `data/green-web.crt`. Регистрация в трее проверена через D-Bus; глазами пользователь не подтверждал.
+- Значок в трее (с 2026-10-24): `tray.py` на системном `/usr/bin/python3` (там есть `gi`; в brew-python его нет) — StatusNotifierItem + dbusmenu по D-Bus через Gio, показывает расширение `ubuntu-appindicators`; служба `lan-vpn-proxy-tray.service` (включена). Меню — состояние ноутбука и `green` из `/api/status`, пункты «Открыть». Для `green` — `GREEN_PASSWORD` в `.env` ноутбука (скопирован с `green`) и сертификат `data/green-web.crt`. Пункт «Закрыть значок» завершает его с кодом 0 — служба не перезапускает; вернуть — ярлык «lan-vpn-proxy» в меню приложений (`lan-vpn-proxy-tray.desktop`, ссылка в `~/.local/share/applications/`) или `systemctl --user start lan-vpn-proxy-tray`. Пользователь значок видел (закрывал из трея).
 - Режим шлюза в интерфейсе (`TPROXY_PORT` > 0, флаг `routing.gateway`): под «Приложениями» — пояснение, что правила по приложениям не действуют; на главной вместо «Прокси GNOME» — «VPN для сети», проверяется системная служба `lan-vpn-proxy-gateway`, а не `lan-vpn-proxy-watch`.
 - Данные веб-интерфейса — в `data/`: `servers.json`, `outbounds.json` (с ключами, 600), `traffic.json`, `hosts.json` (600).
 
@@ -42,7 +42,7 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 
 ## Решения
 - В Docker — Xray, а не сам Happ: Happ — GUI-обёртка, внутри у него тот же Xray.
-- Образ Xray закреплён по версии (`docker-compose.yml`); с 2026-10-19 — `26.10.17` (до этого `26.7.28`, как в Happ). У Xray почти все релизы помечены prerelease, последний «стабильный» `26.3.27` старше — ориентироваться на свежие. Перед сменой версии: `python3 -m unittest discover tests` (конфиг проверяет новый Xray) и «Проверить серверы» на старой и новой версии. Distroless (без shell), поэтому без healthcheck. Работает от `PUID` 1000, чтобы читать `config.json` с правами 600.
+- Образ Xray закреплён по версии (`docker-compose.yml`); с 2026-10-24 — `26.10.21` (срочное обновление безопасности: убраны скомпрометированные корневые сертификаты, `26.10.10` и `26.10.17` отозваны; до этого `26.10.17`, ещё раньше `26.7.28`, как в Happ). Конфиг подключается в `/config` с `command: run -c /config/config.json` (и так же в проверке серверов): с `26.10.21` в образе `/usr/local/etc` — 750 root:65532, `user` 65532 и `VOLUME`, Xray с PUID 1000 не заходит в каталог по умолчанию. У Xray почти все релизы помечены prerelease, последний «стабильный» `26.3.27` старше — ориентироваться на свежие. Перед сменой версии: `python3 -m unittest discover tests` (конфиг проверяет новый Xray) и «Проверить серверы» на старой и новой версии. Distroless (без shell), поэтому без healthcheck. Работает от `PUID` 1000, чтобы читать `config.json` с правами 600.
 - Порты 1080 (SOCKS5) и 3128 (HTTP), а не 10808/10809, как у Happ, — чтобы при переходе обе схемы работали одновременно.
 - Контейнер в `network_mode: host`: в сети bridge Xray видел вместо порта программы `docker-proxy`. Адрес и порты из `.env` `gen_config.py` пишет прямо в конфиг Xray.
 - На ноутбуке `pid: host` + `apparmor=unconfined` — иначе правила по приложениям не работают. На шлюзе не нужно (см. `gateway/compose.yml` ниже).
@@ -101,6 +101,13 @@ _Обновлено: 2026-10-19. Файл ведёт скил `/save-context`._
 - Контейнеры `jarvis-*` теперь ходят напрямую; если им нужен VPN, надо прописать прокси.
 
 ## Журнал сессий
+### 2026-10-24 — сверка, синхронизация правил, значок в трее
+- Xray `26.10.21` (обновление безопасности) на ноутбуке и `green`; конфиг перенесён в `/config` из-за прав в новом образе. Проверка серверов до/после: 7 из 15 на ноутбуке, на `green` 8 из 17.
+- Сверка состояния: всё работает; резервные копии 23–24.10 пропущены — ноутбук был не дома.
+- Пользователь подтвердил вход в веб-интерфейс `green` из браузера.
+- Синхронизация правил ноутбук ↔ `green` по времени изменения (`sync-rules.py`, таймер 15 мин).
+- Значок в трее (`tray.py`) и ярлык в меню приложений. Коммиты до `3c56e81`, запушено.
+
 ### 2026-10-19 — несколько кругов ревью: безопасность, green, тесты, автопереключение
 - Веб-интерфейс: HTTPS с самоподписанным сертификатом и блокировка подбора пароля. В контекст внесён домашний сервер (работа 2026-10-17).
 - `green`: получен SSH-доступ; `install-gateway.sh` и шаблон правил вместо ручных файлов. Git на сервере сделали и по решению пользователя убрали.

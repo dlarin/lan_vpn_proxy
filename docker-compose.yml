@@ -1,6 +1,6 @@
 services:
   xray:
-    image: ghcr.io/xtls/xray-core:26.10.17
+    image: ghcr.io/xtls/xray-core:26.10.21
     container_name: lan-vpn-proxy
     restart: unless-stopped
     # Свой uid, чтобы xray мог читать config.json с правами 600.
@@ -17,8 +17,11 @@ services:
     # действует, только если Xray работает от root (PUID=0); с обычным PUID оно ни на что не влияет.
     cap_add:
       - NET_ADMIN
+    # Не в /usr/local/etc/xray, как по умолчанию в образе: с 26.10.21 /usr/local/etc закрыт
+    # правами 750 root:65532, и Xray с нашим PUID туда не заходит.
     volumes:
-      - ./xray:/usr/local/etc/xray:ro
+      - ./xray:/config:ro
+    command: ["run", "-c", "/config/config.json"]
     # Журнал подключений web.py раз в минуту переносит в data/hosts.json, поэтому
     # держать его целиком незачем.
     logging:
