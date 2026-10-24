@@ -1,0 +1,12 @@
+[Unit]
+Description=lan-vpn-proxy: значок в трее GNOME
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/projects/lan_vpn_proxy/tray.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
