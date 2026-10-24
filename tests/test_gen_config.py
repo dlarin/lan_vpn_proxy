@@ -1,6 +1,6 @@
 """Тесты gen_config.py: разбор подписок и ссылок, .env, правила маршрутизации и сборка конфига.
 
-Запуск: python3 -m unittest discover tests
+Запуск: /usr/bin/python3 -m unittest discover tests
 Конфиг дополнительно проверяет сам Xray (docker run … run -test), если доступен Docker;
 пропустить эту проверку — XRAY_TEST=0.
 """
@@ -171,6 +171,12 @@ class BuildConfig(unittest.TestCase):
         tproxy = self.config(tproxy_port=12345)["inbounds"][-1]
         self.assertEqual((tproxy["tag"], tproxy["port"], tproxy["protocol"]), ("tproxy", 12345, "dokodemo-door"))
         self.assertIn("quic", tproxy["sniffing"]["destOverride"])
+
+    def test_gateway_has_no_process_rule(self):
+        # На шлюзе Xray не видит процессов устройств: правило по VPN_APPS бесполезно.
+        has_process = lambda cfg: any("process" in r for r in cfg["routing"]["rules"])  # noqa: E731
+        self.assertTrue(has_process(self.config()))
+        self.assertFalse(has_process(self.config(tproxy_port=12345)))
 
     def test_config_settings_from_env(self):
         s = g.config_settings({"TPROXY_PORT": "12345", "ROUTING_MODE": "filter", "VPN_HOSTS": "a.com, b.com"})

@@ -1,6 +1,6 @@
 """Тесты автопереключения в web.py (AutoSwitch): Docker, Xray и сеть подменены.
 
-Запуск: python3 -m unittest discover tests
+Запуск: /usr/bin/python3 -m unittest discover tests
 """
 import json
 import os

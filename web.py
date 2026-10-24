@@ -9,6 +9,7 @@
 import base64
 import collections
 import datetime
+import fcntl
 import hmac
 import http.client
 import ipaddress
@@ -101,7 +102,36 @@ SOCKS_PORT = setting(dotenv, "SOCKS_PORT", "1080")
 # WEB_HOSTS — адреса и имена, по которым страницу открывают из сети (192.168.0.141 и т.п.).
 ALLOWED_HOSTS = {f"{host}:{WEB_PORT}" for host in ["127.0.0.1", "localhost", *split_list(setting(dotenv, "WEB_HOSTS"))]}
 ALLOWED_ORIGINS = {f"{'https' if WEB_TLS else 'http'}://{host}" for host in ALLOWED_HOSTS}
-ACTION_LOCK = threading.Lock()
+class ActionLock:
+    """Одно действие с конфигом и контейнером за раз — и между потоками службы, и с `web.py rules-set`
+    (его отдельным процессом запускает sync-rules.py): потоки ждут threading.Lock, процессы — flock."""
+
+    def __init__(self, path):
+        self.path = path
+        self.threads = threading.Lock()
+        self.file = None
+
+    def __enter__(self):
+        self.threads.acquire()
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self.file = open(self.path, "a")
+            fcntl.flock(self.file, fcntl.LOCK_EX)
+        except BaseException:
+            if self.file:
+                self.file.close()
+                self.file = None
+            self.threads.release()
+            raise
+        return self
+
+    def __exit__(self, *_):
+        self.file.close()  # закрытие снимает flock
+        self.file = None
+        self.threads.release()
+
+
+ACTION_LOCK = ActionLock(os.path.join(PROJECT_DIR, "data", "action.lock"))
 CHECK_LOCK = threading.Lock()
 # Автопереключение: раз в AUTO_INTERVAL секунд запрос через текущий сервер; AUTO_FAILS неудач подряд —
 # проверка всех серверов и переход на самый быстрый рабочий. SUBSCRIPTION_REFRESH — раз во сколько часов
@@ -609,6 +639,7 @@ def save_rules(body, updated=None):
     settings = config_settings(load_env(ENV_FILE))
     settings["routing"] = {"mode": body["mode"], **lists}
     with ACTION_LOCK:
+        before = comparable_config()
         error = write_server_config((load_servers() or {}).get("current"), settings)
         if error:
             return False, error
@@ -618,7 +649,10 @@ def save_rules(body, updated=None):
         set_env_value(ENV_FILE, "DIRECT_HOSTS", ", ".join(lists["direct"]))
         # По нему sync-rules.py решает, чьи правила новее — ноутбука или green.
         set_env_value(ENV_FILE, "RULES_UPDATED", str(updated if isinstance(updated, int) and updated > 0 else int(time.time())))
-        ok, restarted = restart_if_running()
+        # Конфиг тот же (например, на шлюзе поменяли только VPN_APPS) — не рвём соединения перезапуском.
+        # Исключения прокси GNOME из DIRECT_HOSTS proxy-watch.sh берёт при перезапуске, но DIRECT_HOSTS
+        # есть и в конфиге — его правка конфиг меняет.
+        ok, restarted = restart_if_running() if comparable_config() != before else (True, False)
     if not ok:
         return False, restarted
     mode = "всё через VPN" if body["mode"] == "all" else \
@@ -690,7 +724,7 @@ def check_servers():
         write_json(os.path.join(tmp, "config.json"), build_check_config(chains, CHECK_FIRST_PORT))
         ports = range(CHECK_FIRST_PORT, CHECK_FIRST_PORT + len(chains))
         _, image, _ = run("docker", "compose", "config", "--images")
-        run("docker", "rm", "-f", CHECK_CONTAINER)  # остаток прерванной проверки
+        run("docker", "rm", "-fv", CHECK_CONTAINER)  # остаток прерванной проверки
         # Сеть хоста, как у основного контейнера: на шлюзе Docker не управляет iptables
         # ("iptables": false), и в сети bridge у Xray нет ни выхода в интернет, ни проброса портов.
         ok, _, err = run("docker", "run", "-d", "--rm", "--name", CHECK_CONTAINER,
@@ -704,7 +738,8 @@ def check_servers():
             with ThreadPoolExecutor(max_workers=len(chains)) as pool:
                 delays = list(pool.map(probe, ports))
         finally:
-            run("docker", "rm", "-f", CHECK_CONTAINER)
+            # -v: иначе остаются анонимные тома образа (VOLUME), по два на каждую проверку
+            run("docker", "rm", "-fv", CHECK_CONTAINER)
         last_check.update(time=datetime.datetime.now().isoformat(timespec="minutes"),
                           delays={s["name"]: d for s, d in zip(servers, delays)})
         return True, f"Работают {sum(d is not None for d in delays)} из {len(delays)}."
@@ -808,6 +843,74 @@ def now_minutes():
 AUTO = AutoSwitch()
 
 
+class XrayRelease:
+    """Новые версии Xray: раз в день сверяет тег образа в docker-compose.yml с релизами на GitHub.
+
+    latest — последний релиз, который разработчики пометили основным (так они выпускают и срочные
+    обновления безопасности); withdrawn — нашего тега на GitHub больше нет, версию отозвали.
+    Без доступа к GitHub (green) просто молчит.
+    """
+    API = "https://api.github.com/repos/XTLS/Xray-core/releases"
+    INTERVAL = 24 * 3600
+    RETRY = 3600
+
+    def __init__(self):
+        self.latest = self.withdrawn = self.checked = None
+
+    @staticmethod
+    def current():
+        try:
+            with open(os.path.join(PROJECT_DIR, "docker-compose.yml"), encoding="utf-8") as f:
+                match = re.search(r"image:\s*\S*xray-core:(\S+)", f.read())
+        except OSError:
+            return None
+        return match and match.group(1)
+
+    @staticmethod
+    def newer(a, b):
+        """a новее b; теги вида 26.10.21 (бывает v впереди)."""
+        def key(tag):
+            return [int(part) for part in re.findall(r"\d+", tag)]
+        return key(a) > key(b)
+
+    def get(self, path):
+        request = urllib.request.Request(self.API + path, headers={"User-Agent": "lan-vpn-proxy",
+                                                                   "Accept": "application/vnd.github+json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=15) as response:
+            return json.load(response)
+
+    def check(self):
+        current = self.current()
+        if not current:
+            return
+        self.latest = self.get("/latest")["tag_name"].lstrip("v")
+        try:
+            self.get(f"/tags/v{current}")
+            self.withdrawn = False
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            self.withdrawn = True
+        self.checked = now_minutes()
+
+    def info(self):
+        current = self.current()
+        return {"current": current, "latest": self.latest, "checked": self.checked, "withdrawn": bool(self.withdrawn),
+                "update": bool(current and self.latest and self.newer(self.latest, current))}
+
+    def run_forever(self):
+        while True:
+            try:
+                self.check()
+                time.sleep(self.INTERVAL)
+            except (OSError, ValueError, KeyError, http.client.HTTPException):
+                time.sleep(self.RETRY)
+
+
+XRAY = XrayRelease()
+
+
 def status():
     _, mode, _ = run("gsettings", "get", "org.gnome.system.proxy", "mode", timeout=5)
     _, port, _ = run("gsettings", "get", "org.gnome.system.proxy.http", "port", timeout=5)
@@ -829,6 +932,7 @@ def status():
         "servers_updated": servers["updated"] if servers else None,
         "cisco": CISCO.info(),
         "auto": AUTO.info(),
+        "xray": XRAY.info(),
     }
 
 
@@ -1188,6 +1292,7 @@ def main():
     threading.Thread(target=collect_forever, daemon=True).start()
     threading.Thread(target=SOCKETS.run_forever, daemon=True).start()
     threading.Thread(target=AUTO.run_forever, daemon=True).start()
+    threading.Thread(target=XRAY.run_forever, daemon=True).start()
     if WEB_BIND not in ("127.0.0.1", "localhost", "::1") and not WEB_PASSWORD:
         sys.exit(f"WEB_BIND={WEB_BIND} без WEB_PASSWORD: страницу без пароля откроет любой в сети")
     server = ThreadingHTTPServer((WEB_BIND, WEB_PORT), Handler)

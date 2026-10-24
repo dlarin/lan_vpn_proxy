@@ -1,7 +1,7 @@
 """Тесты веб-интерфейса (web.py): защита запросов, пароль и блокировка подбора, сохранение правил.
 
 Сервер поднимается на свободном порту 127.0.0.1; Docker и Xray подменены.
-Запуск: python3 -m unittest discover tests
+Запуск: /usr/bin/python3 -m unittest discover tests
 """
 import base64
 import http.client
@@ -121,6 +121,8 @@ class SaveRules(unittest.TestCase):
             mock.patch.object(web, "write_server_config", return_value=None),
             mock.patch.object(web, "restart_if_running", return_value=(True, True)),
             mock.patch.object(web, "set_env_value", side_effect=lambda path, k, v: self.env.update({k: v})),
+            # По умолчанию конфиг после сохранения другой: каждый вызов — новый объект.
+            mock.patch.object(web, "comparable_config", side_effect=lambda: object()),
         ]
         for p in self.patches:
             p.start()
@@ -140,6 +142,14 @@ class SaveRules(unittest.TestCase):
                                     "DIRECT_HOSTS": "work.ru"})
         self.assertAlmostEqual(int(updated), web.time.time(), delta=5)
         self.assertIn("перезапущен", message)
+
+    def test_same_config_no_restart(self):
+        # Например, на шлюзе поменяли только VPN_APPS — VPN всей сети перезапускать незачем.
+        web.comparable_config.side_effect = lambda: {"same": True}
+        ok, message = self.save()
+        self.assertTrue(ok)
+        web.restart_if_running.assert_not_called()
+        self.assertNotIn("перезапущен", message)
 
     def test_keeps_given_update_time(self):
         # sync-rules.py переносит правила с другой машины вместе с их временем.
@@ -163,6 +173,50 @@ class SaveRules(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.env, {})
         web.restart_if_running.assert_not_called()
+
+
+class ActionLockTest(unittest.TestCase):
+    def test_blocks_other_process(self):
+        # web.py rules-set (sync-rules.py) — отдельный процесс: ему должна мешать блокировка службы.
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "action.lock")
+            try_lock = ("import fcntl, sys; f = open(sys.argv[1], 'a')\n"
+                        "try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                        "except OSError: sys.exit(1)")
+            with web.ActionLock(path):
+                self.assertEqual(subprocess.run([sys.executable, "-c", try_lock, path]).returncode, 1)
+            self.assertEqual(subprocess.run([sys.executable, "-c", try_lock, path]).returncode, 0)
+
+
+class XrayReleaseTest(unittest.TestCase):
+    def check(self, current, latest, ours_exists=True):
+        release = web.XrayRelease()
+
+        def get(path):
+            if path == "/latest":
+                return {"tag_name": "v" + latest}
+            if not ours_exists:
+                raise web.urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+            return {}
+        with mock.patch.object(release, "current", return_value=current), mock.patch.object(release, "get", get):
+            release.check()
+            return release.info()
+
+    def test_update_available(self):
+        self.assertTrue(self.check("26.10.17", "26.10.21")["update"])
+        self.assertFalse(self.check("26.10.21", "26.10.21")["update"])
+        # Основной релиз бывает старше свежего prerelease — это не повод предлагать «обновление».
+        self.assertFalse(self.check("26.10.21", "26.3.27")["update"])
+        self.assertTrue(web.XrayRelease.newer("26.11.1", "26.10.21"))
+
+    def test_withdrawn(self):
+        info = self.check("26.10.17", "26.10.21", ours_exists=False)
+        self.assertTrue(info["withdrawn"])
+        self.assertFalse(self.check("26.10.21", "26.10.21")["withdrawn"])
+
+    def test_current_from_compose(self):
+        self.assertRegex(web.XrayRelease.current(), r"^\d+\.\d+\.\d+$")
 
 
 class DevicesTest(unittest.TestCase):

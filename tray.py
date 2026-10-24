@@ -107,6 +107,12 @@ def describe(name, status, unreachable):
     event = (status.get("auto") or {}).get("event")
     if event:
         lines.append(f"    автопереключение {event['time']}: {event['text']}")
+    xray = status.get("xray") or {}
+    if xray.get("withdrawn"):
+        state = "warn"
+        lines.append(f"    Xray {xray['current']} отозван — обновите" + (f" до {xray['latest']}" if xray.get("latest") else ""))
+    elif xray.get("update"):
+        lines.append(f"    вышел Xray {xray['latest']} (у вас {xray['current']})")
     cisco = status.get("cisco")
     if cisco:
         lines.append("    Cisco: " + ("подключён" if cisco.get("state") == "Connected" else "отключён"))
@@ -115,9 +121,7 @@ def describe(name, status, unreachable):
 
 class Tray:
     def __init__(self):
-        dotenv = load_env(ENV_FILE)
-        self.green_url = setting(dotenv, "GREEN_URL", "https://192.168.0.2:8765")
-        self.green_password = setting(dotenv, "GREEN_PASSWORD", "")
+        self.green_url, self.green_password = setting(load_env(ENV_FILE), "GREEN_URL", "https://192.168.0.2:8765"), ""
         self.icon, self.tooltip = ICONS["off"], "lan-vpn-proxy"
         self.lines = ["загрузка…"]
         self.revision = 1
@@ -145,6 +149,10 @@ class Tray:
         return True
 
     def poll(self):
+        # .env — при каждом опросе: поменяли пароль green — значок подхватит без перезапуска.
+        dotenv = load_env(ENV_FILE)
+        self.green_url = setting(dotenv, "GREEN_URL", "https://192.168.0.2:8765")
+        self.green_password = setting(dotenv, "GREEN_PASSWORD", "")
         laptop = fetch(LAPTOP_URL)
         green = None
         if self.green_password and os.path.exists(GREEN_CERT):

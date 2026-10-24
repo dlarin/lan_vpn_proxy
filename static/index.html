@@ -156,6 +156,7 @@
 <button id="toggle" class="large primary" disabled>…</button>
 <p id="error" class="note err" hidden></p>
 <p id="hint" class="note warn" hidden></p>
+<p id="xray-note" class="note warn" hidden></p>
 <dl>
   <dt>Сервер</dt><dd><span id="server">—</span> <a href="#servers">сменить</a></dd>
   <dt>Через VPN</dt><dd><span id="routing">—</span> <a href="#rules">изменить</a></dd>
@@ -433,11 +434,21 @@ function render(s) {
     ? 'Служба lan-vpn-proxy-gateway не запущена: устройства сети ходят напрямую — sudo ./install-gateway.sh'
     : 'Служба lan-vpn-proxy-watch не запущена: системный прокси GNOME не будет переключаться';
   note('hint', hint);
+  renderXray(s.xray);
   renderCisco(s.cisco);
   renderTraffic(s.traffic);
 }
 
-const CISCO_STATES = {Connected: 'подключён', Disconnected: 'отключён', Connecting: 'подключается…',
+// Новая версия Xray (раз в день сверяется с GitHub); как обновлять — README, «Версия Xray».
+function renderXray(x) {
+  let text = '';
+  if (x && x.withdrawn) text = 'Xray ' + x.current + ' отозван разработчиками — обновите' +
+    (x.latest ? ' до ' + x.latest : '') + ' (README, «Версия Xray»).';
+  else if (x && x.update) text = 'Вышел Xray ' + x.latest + ', у вас ' + x.current + ' (README, «Версия Xray»).';
+  note('xray-note', text);
+}
+
+const CISCO_STATES ={Connected: 'подключён', Disconnected: 'отключён', Connecting: 'подключается…',
                       Reconnecting: 'переподключается…', Disconnecting: 'отключается…'};
 
 function renderCisco(c) {

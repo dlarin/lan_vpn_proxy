@@ -1,6 +1,6 @@
 """shellcheck для bash-скриптов проекта — в Docker, на компьютер ничего не ставится.
 
-Запуск: python3 -m unittest discover tests; без Docker тест пропускается, пропустить явно — SHELLCHECK=0.
+Запуск: /usr/bin/python3 -m unittest discover tests; без Docker тест пропускается, пропустить явно — SHELLCHECK=0.
 """
 import glob
 import os

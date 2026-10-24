@@ -1,4 +1,4 @@
-"""Тесты sync-rules.py: чьи правила взять. Запуск: python3 -m unittest discover tests"""
+"""Тесты sync-rules.py: чьи правила взять. Запуск: /usr/bin/python3 -m unittest discover tests"""
 import importlib.util
 import os
 import unittest

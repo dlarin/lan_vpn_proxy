@@ -375,7 +375,9 @@ def build_config(server, listen, socks_port, http_port, routing, tproxy_port=0):
                               "statsOutboundUplink": True, "statsOutboundDownlink": True}},
         "inbounds": inbounds,
         "outbounds": outbounds,
-        "routing": {"rules": routing_rules(routing)},
+        # На шлюзе процессов устройств Xray не видит (gateway/compose.yml без pid: host): правило по
+        # VPN_APPS только перебирало бы /proc зря, а его правка перезапускала бы VPN всей сети.
+        "routing": {"rules": routing_rules({**routing, "apps": []} if tproxy_port else routing)},
     }
 
 

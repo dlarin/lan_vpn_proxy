@@ -1,6 +1,6 @@
 """Тесты tray.py: строки меню и состояние значка. Без gi (не системный Python) тест пропускается.
 
-Запуск: python3 -m unittest discover tests
+Запуск: /usr/bin/python3 -m unittest discover tests
 """
 import os
 import sys
@@ -19,7 +19,7 @@ def status(**changes):
             "traffic": [{"vpn_down": 2048, "vpn_up": 10}], "auto": {"event": None}, "cisco": None, **changes}
 
 
-@unittest.skipIf(tray is None, "нет gi — запускайте /usr/bin/python3 -m unittest discover tests")
+@unittest.skipIf(tray is None, "нет gi — запускайте системным /usr/bin/python3")
 class Describe(unittest.TestCase):
     def test_on(self):
         lines, state = tray.describe("Ноутбук", status(), "")
