@@ -120,6 +120,11 @@ def describe(name, status, unreachable):
         lines.append(f"    Xray {xray['current']} отозван — обновите" + (f" до {xray['latest']}" if xray.get("latest") else ""))
     elif xray.get("update"):
         lines.append(f"    вышел Xray {xray['latest']} (у вас {xray['current']})")
+    if xray.get("stale"):
+        state = "warn"
+        lines.append(f"    контейнер на Xray {xray['running']}, а в compose {xray['current']} — пересоздайте")
+    if status.get("kernel"):
+        lines.append(f"    новое ядро {status['kernel']} — нужна перезагрузка")
     cisco = status.get("cisco")
     if cisco:
         lines.append("    Cisco: " + ("подключён" if cisco.get("state") == "Connected" else "отключён"))

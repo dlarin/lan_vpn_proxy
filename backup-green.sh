@@ -4,6 +4,7 @@
 #   ./backup-green.sh [пользователь@сервер]
 # Архивы — в ~/backups/lan_vpn_proxy (права 600), хранятся последние KEEP. Сервер недоступен
 # (ноутбук не дома) — выходит без ошибки: так его можно запускать таймером.
+# Заодно кладёт .env и data/ ноутбука на сервер, в ~/backups/laptop (тоже последние KEEP).
 set -euo pipefail
 
 HOST=${1:-dima@192.168.0.2}
@@ -31,3 +32,12 @@ archives=("$DEST"/green-*.tar.gz)
 if [ "${#archives[@]}" -gt "$KEEP" ]; then
     rm -- "${archives[@]:0:${#archives[@]}-KEEP}"
 fi
+
+# И обратно: .env и data/ ноутбука (подписка, GREEN_PASSWORD) — на сервер, в ~/backups/laptop.
+# Пропадёт ноутбук — настройки останутся на сервере.
+cd "$(dirname "$0")"
+remote="backups/laptop/laptop-$(date +%Y-%m-%d_%H%M).tar.gz"
+tar -czf - .env data | "${SSH[@]}" "umask 077 && mkdir -p backups/laptop && cat > $remote.tmp &&
+    tar -tzf $remote.tmp .env >/dev/null && mv $remote.tmp $remote &&
+    ls -1 backups/laptop/laptop-*.tar.gz | head -n -$KEEP | xargs -r rm --"
+echo "ноутбук сохранён на сервере: ~/$remote"

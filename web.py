@@ -157,9 +157,11 @@ def container_state():
     ok, out, _ = run("docker", "inspect", CONTAINER, timeout=10)
     if not ok:
         return {"exists": False, "running": False, "restarting": False, "status": "не создан"}
-    state = json.loads(out)[0]["State"]
+    info = json.loads(out)[0]
+    state = info["State"]
     return {
         "exists": True,
+        "image": info["Config"]["Image"],  # с каким образом создан: файл могли обновить, а контейнер — нет
         "running": state["Running"] and not state["Restarting"],
         "restarting": state["Restarting"],
         "status": state["Status"],
@@ -848,7 +850,8 @@ class XrayRelease:
 
     latest — последний релиз, который разработчики пометили основным (так они выпускают и срочные
     обновления безопасности); withdrawn — нашего тега на GitHub больше нет, версию отозвали.
-    Без доступа к GitHub (green) просто молчит.
+    Нет доступа к GitHub — просто молчит. container — образ, с которым создан контейнер: если
+    docker-compose.yml обновили, а контейнер не пересоздали, работает ещё старая версия.
     """
     API = "https://api.github.com/repos/XTLS/Xray-core/releases"
     INTERVAL = 24 * 3600
@@ -894,10 +897,12 @@ class XrayRelease:
             self.withdrawn = True
         self.checked = now_minutes()
 
-    def info(self):
+    def info(self, container_image=None):
         current = self.current()
+        running = container_image.rpartition(":")[2] if container_image and "xray-core:" in container_image else None
         return {"current": current, "latest": self.latest, "checked": self.checked, "withdrawn": bool(self.withdrawn),
-                "update": bool(current and self.latest and self.newer(self.latest, current))}
+                "update": bool(current and self.latest and self.newer(self.latest, current)),
+                "running": running, "stale": bool(current and running and running != current)}
 
     def run_forever(self):
         while True:
@@ -919,8 +924,9 @@ def status():
     _, watcher, _ = run("systemctl", *([] if routing["gateway"] else ["--user"]), "is-active",
                         GATEWAY_SERVICE if routing["gateway"] else WATCH_SERVICE, timeout=5)
     servers = load_servers()
+    container = container_state()
     return {
-        **container_state(),
+        **container,
         "config": os.path.isfile(DEFAULT_OUTPUT),
         "proxy_mode": mode.strip("'"),
         "proxy_port": port,
@@ -932,8 +938,21 @@ def status():
         "servers_updated": servers["updated"] if servers else None,
         "cisco": CISCO.info(),
         "auto": AUTO.info(),
-        "xray": XRAY.info(),
+        "xray": XRAY.info(container.get("image")),
+        "kernel": kernel_update() if routing["gateway"] else None,
     }
+
+
+def kernel_update():
+    """Установленное, но не загруженное ядро (unattended-upgrades не перезагружает сервер) или None."""
+    try:
+        installed = [name[len("vmlinuz-"):] for name in os.listdir("/boot") if name.startswith("vmlinuz-")]
+    except OSError:
+        return None
+    if not installed:
+        return None
+    newest = max(installed, key=lambda v: [int(n) for n in re.findall(r"\d+", v)])
+    return newest if newest != os.uname().release else None
 
 
 def turn_on():

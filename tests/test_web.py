@@ -236,6 +236,23 @@ class XrayReleaseTest(unittest.TestCase):
         self.assertTrue(info["withdrawn"])
         self.assertFalse(self.check("26.10.21", "26.10.21")["withdrawn"])
 
+    def test_stale_container(self):
+        # docker-compose.yml обновили (scp), а контейнер не пересоздали — работает старая версия.
+        release = web.XrayRelease()
+        with mock.patch.object(release, "current", return_value="26.10.21"):
+            info = release.info("ghcr.io/xtls/xray-core:26.10.17")
+            self.assertEqual((info["running"], info["stale"]), ("26.10.17", True))
+            self.assertFalse(release.info("ghcr.io/xtls/xray-core:26.10.21")["stale"])
+            self.assertFalse(release.info(None)["stale"])  # контейнера нет
+
+    def test_kernel_update(self):
+        files = ["vmlinuz-6.12.107+deb13-amd64", "vmlinuz-6.12.113+deb13-amd64", "initrd.img-6.12.113+deb13-amd64"]
+        with mock.patch.object(web.os, "listdir", return_value=files):
+            for running, expected in (("6.12.107+deb13-amd64", "6.12.113+deb13-amd64"), ("6.12.113+deb13-amd64", None)):
+                with self.subTest(running=running), \
+                        mock.patch.object(web.os, "uname", return_value=mock.Mock(release=running)):
+                    self.assertEqual(web.kernel_update(), expected)
+
     def test_current_from_compose(self):
         self.assertRegex(web.XrayRelease.current(), r"^\d+\.\d+\.\d+$")
 

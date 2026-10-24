@@ -43,6 +43,14 @@ class Describe(unittest.TestCase):
         self.assertIn("23:10: не ответил (2 подряд)", probe(None, 2))
         self.assertNotIn("проверка", "\n".join(tray.describe("Ноутбук", status(), "")[0]))  # выключено
 
+    def test_stale_container_and_kernel(self):
+        lines, state = tray.describe("green", status(
+            xray={"current": "26.10.21", "running": "26.10.17", "stale": True}, kernel="6.12.120+deb13-amd64"), "")
+        self.assertEqual(state, "warn")
+        text = "\n".join(lines)
+        self.assertIn("пересоздайте", text)
+        self.assertIn("нужна перезагрузка", text)
+
     def test_stopped_service_warns(self):
         self.assertEqual(tray.describe("Ноутбук", status(running=False, watcher=False), "")[1], "warn")
 

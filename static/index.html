@@ -157,6 +157,7 @@
 <p id="error" class="note err" hidden></p>
 <p id="hint" class="note warn" hidden></p>
 <p id="xray-note" class="note warn" hidden></p>
+<p id="kernel-note" class="note warn" hidden></p>
 <dl>
   <dt>Сервер</dt><dd><span id="server">—</span> <a href="#servers">сменить</a></dd>
   <dt>Через VPN</dt><dd><span id="routing">—</span> <a href="#rules">изменить</a></dd>
@@ -435,6 +436,7 @@ function render(s) {
     : 'Служба lan-vpn-proxy-watch не запущена: системный прокси GNOME не будет переключаться';
   note('hint', hint);
   renderXray(s.xray);
+  renderKernel(s.kernel);
   renderCisco(s.cisco);
   renderTraffic(s.traffic);
 }
@@ -445,7 +447,14 @@ function renderXray(x) {
   if (x && x.withdrawn) text = 'Xray ' + x.current + ' отозван разработчиками — обновите' +
     (x.latest ? ' до ' + x.latest : '') + ' (README, «Версия Xray»).';
   else if (x && x.update) text = 'Вышел Xray ' + x.latest + ', у вас ' + x.current + ' (README, «Версия Xray»).';
+  if (x && x.stale) text = (text ? text + ' ' : '') + 'Контейнер создан с Xray ' + x.running + ', а в docker-compose.yml — ' +
+    x.current + ': пересоздайте его — docker compose up -d --force-recreate.';
   note('xray-note', text);
+}
+
+// Шлюз: unattended-upgrades ставит ядро, но не перезагружает сервер.
+function renderKernel(k) {
+  note('kernel-note', k ? 'Установлено новое ядро ' + k + ' — оно заработает после перезагрузки сервера (sudo reboot).' : '');
 }
 
 const CISCO_STATES ={Connected: 'подключён', Disconnected: 'отключён', Connecting: 'подключается…',
