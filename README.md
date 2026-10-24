@@ -175,7 +175,10 @@ xdg-open http://127.0.0.1:8765
 scp dima@192.168.0.2:lan_vpn_proxy/data/web.crt data/green-web.crt
 systemctl --user link ~/projects/lan_vpn_proxy/lan-vpn-proxy-tray.service
 systemctl --user enable --now lan-vpn-proxy-tray.service
+ln -s ~/projects/lan_vpn_proxy/lan-vpn-proxy-tray.desktop ~/.local/share/applications/   # в меню приложений
 ```
+
+«Закрыть значок» завершает его до следующего входа в систему; вернуть — «lan-vpn-proxy» в меню приложений или `systemctl --user start lan-vpn-proxy-tray`.
 
 Если `green` пересоздаст сертификат (поменяли `WEB_HOSTS`), копию нужно обновить, иначе в меню будет «недоступен».
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=lan-vpn-proxy
+Comment=Значок VPN в трее: состояние ноутбука и green
+Exec=systemctl --user start lan-vpn-proxy-tray.service
+Icon=network-vpn-symbolic
+Terminal=false
+Categories=Network;
